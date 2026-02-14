@@ -1,0 +1,34 @@
+# On-Call Operations Runbook
+
+Last updated: February 14, 2026
+
+## On-Call Rotation
+
+- Primary: owns initial response and mitigation.
+- Secondary: escalation backup and verification.
+
+## Shift Start Checklist
+
+1. Confirm monitoring pipelines are green.
+2. Confirm alert routing to PagerDuty/Slack.
+3. Confirm latest deployment and migration state.
+4. Confirm latest backup/restore drill report is passing.
+
+## Alert Triage Priorities
+
+1. `AITraceReadinessFailure` (critical)
+2. `AITraceDeploymentUnavailable` (critical)
+3. `AITracePodCrashLooping` (critical)
+4. `AITraceHighProbeLatencyP95` (warning)
+
+## Standard Checks
+
+- `curl -sS http://<api-host>/health/live`
+- `curl -sS http://<api-host>/health/ready`
+- `curl -sS http://<api-host>/metrics`
+
+## Escalation
+
+- Escalate Sev1 immediately to platform owner + security owner.
+- Escalate unresolved Sev2 after 30 minutes.
+- Escalate unresolved Sev3 after 4 hours.

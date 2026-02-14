@@ -1,0 +1,23 @@
+service: ai-trace
+window: 30d
+objectives:
+  - id: availability
+    target: 99.9
+    indicator:
+      type: probe_success_ratio
+      query: sum(rate(probe_success{job="ai-trace-ready"}[5m])) / count(rate(probe_success{job="ai-trace-ready"}[5m]))
+  - id: readiness_latency_p95
+    target: 0.95
+    threshold_ms: 1000
+    indicator:
+      type: histogram_quantile
+      query: histogram_quantile(0.95, sum(rate(probe_http_duration_seconds_bucket{job="ai-trace-ready"}[5m])) by (le))
+  - id: runtime_errors
+    target: 99.5
+    indicator:
+      type: ratio
+      query: 1 - (sum(increase(kube_pod_container_status_restarts_total{namespace="ai-trace-prod",container="api"}[5m])) / 100)
+error_budget_policy:
+  page_threshold_percent: 50
+  ticket_threshold_percent: 25
+  freeze_deploy_threshold_percent: 10

@@ -1,0 +1,14 @@
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: ai-trace-ready
+  namespace: monitoring
+spec:
+  interval: 30s
+  module: http_2xx
+  prober:
+    url: blackbox-exporter.monitoring.svc:9115
+  targets:
+    staticConfig:
+      static:
+        - https://ai-trace.example.com/health/ready

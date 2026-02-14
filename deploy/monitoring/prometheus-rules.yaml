@@ -1,0 +1,47 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ai-trace-rules
+  namespace: monitoring
+spec:
+  groups:
+    - name: ai-trace-availability
+      rules:
+        - alert: AITraceReadinessFailure
+          expr: probe_success{job="ai-trace-ready"} == 0
+          for: 2m
+          labels:
+            severity: critical
+            service: ai-trace
+          annotations:
+            summary: "AI Trace readiness probe failing"
+            description: "Blackbox probe to /health/ready is failing for more than 2 minutes."
+        - alert: AITraceHighProbeLatencyP95
+          expr: histogram_quantile(0.95, sum(rate(probe_http_duration_seconds_bucket{job="ai-trace-ready"}[5m])) by (le)) > 1.0
+          for: 10m
+          labels:
+            severity: warning
+            service: ai-trace
+          annotations:
+            summary: "AI Trace readiness p95 latency high"
+            description: "p95 readiness latency exceeded 1s for at least 10 minutes."
+    - name: ai-trace-runtime
+      rules:
+        - alert: AITraceDeploymentUnavailable
+          expr: kube_deployment_status_replicas_unavailable{namespace="ai-trace-prod",deployment="ai-trace-api"} > 0
+          for: 5m
+          labels:
+            severity: critical
+            service: ai-trace
+          annotations:
+            summary: "AI Trace deployment has unavailable replicas"
+            description: "At least one ai-trace-api pod is unavailable for more than 5 minutes."
+        - alert: AITracePodCrashLooping
+          expr: increase(kube_pod_container_status_restarts_total{namespace="ai-trace-prod",container="api"}[15m]) > 2
+          for: 5m
+          labels:
+            severity: critical
+            service: ai-trace
+          annotations:
+            summary: "AI Trace pod restarting repeatedly"
+            description: "API container restarted more than 2 times in 15 minutes."

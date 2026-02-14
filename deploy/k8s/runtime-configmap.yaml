@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-trace-runtime-config
+  namespace: ai-trace-prod
+data:
+  scheduler_org_ids: "prod-org"

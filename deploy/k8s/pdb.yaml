@@ -1,0 +1,10 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ai-trace-api
+  namespace: ai-trace-prod
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: ai-trace-api
