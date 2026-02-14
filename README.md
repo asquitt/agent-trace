@@ -1,68 +1,31 @@
 # AI Trace
 
-Production-focused agent observability and runtime governance platform.
+AI Trace is an agent observability and runtime governance platform for production agent fleets.
 
-AI Trace provides end-to-end traceability for autonomous agent systems and adds operational controls for cost, safety, and reliability across deployments.
+It combines trace/session visibility with active controls so operators can detect abnormal behavior, enforce budget/safety policies, and audit interventions across deployments.
 
-## What You Get
+## Product Scope
 
-- Trace, span, and reasoning-chain capture
+AI Trace extends classic LLM tracing into a control plane:
+
 - Fleet and session observability across deployments
-- Active-session activity feed (latest action type/name/resource + elapsed runtime)
-- Runtime anomaly detection (API spikes, cost spikes, unusual resource access, memory divergence, delegation loops)
-- Budget policy engine with runtime controls (`alert`, `throttle`, `require_approval`, `shutdown`)
+- Real-time anomaly detection for agent behavior
+- Memory consistency monitoring across distributed sessions
 - Multi-agent delegation chain tracing
-- Continuous control loops (scheduler), notifications, and run audit logs
-- Risk drift insights + scheduler health telemetry surfaced via APIs and dashboard
-- Tenant-scoped API auth, RBAC, and shutdown approval workflow
-- Persistent system audit events and SIEM export endpoint
-- Request rate limiting with configurable windows
+- Budget policy evaluation with runtime actions (`alert`, `throttle`, `require_approval`, `shutdown`)
+- Operations scheduler with persistent run/audit logs
+- SIEM export and operational notifications (webhook, Slack, PagerDuty)
 
 ## Release Status
 
-**Current version:** `0.2.0`  
-**Maturity:** Beta  
-**Validation snapshot (February 14, 2026):** `34 passed` (full unit + integration on fresh migrated Postgres)
-
-## Core Capabilities
-
-### 1) Runtime Visibility
-
-- Deployments, sessions, actions, delegations, memory snapshots
-- Fleet metrics, top agents/resources, cost/token summaries
-- Active session inventory and session lifecycle tracking
-- Latest observed action context per active session for operator triage
-
-### 2) Detection + Governance
-
-- Rule-based detectors for behavioral/runtime anomalies
-- Budget policies with automatic enforcement actions
-- Policy conflict priority handling:
-  - `shutdown > require_approval > throttle > alert`
-
-### 3) Safety Controls
-
-- Optional requirement for explicit approval before shutdown actions execute
-- Approval API workflow:
-  - create approval request
-  - approve/reject decision
-  - list and audit approval records
-
-### 4) Operations Plane
-
-- Manual control-loop execution endpoints
-- Background scheduler for periodic detectors/policies
-- Outbound webhook notifications with retry/backoff
-- Persistent operation-run logs for manual and scheduled loops
-- Scheduler health state (`healthy`/`degraded`/`stopped`/`disabled`) in operations + metrics APIs
-- Immutable-style system audit event log for control-plane activity
-
-### 5) Security and Isolation
-
-- API key authentication (optional, configurable)
-- RBAC roles: `viewer`, `operator`, `admin`
-- Tenant scope enforcement by org (`X-Org-Id` + policy/org checks)
-- Configurable in-memory request rate limiting (`429` with limit headers)
+- Version: `0.2.0`
+- Maturity: `Beta`
+- Last validation: February 14, 2026
+- Validation evidence:
+  - `ruff check --select F src tests` passed
+  - `pyright` passed (`0 errors`)
+  - `pytest -q` passed (`38 passed, 2 skipped`)
+  - `./scripts/run_full_e2e.sh` passed (fresh DB, migration replay, double test pass)
 
 ## Architecture
 
@@ -79,7 +42,7 @@ src/
 │   ├── operations_scheduler.py
 │   └── notifications.py
 ├── tracing/                    # Tracer/context/provider wrappers + storage backend
-├── security.py                 # Auth + RBAC + tenant enforcement helpers
+├── security.py                 # Auth + RBAC + tenant enforcement
 └── config.py                   # Environment-backed settings
 ```
 
@@ -113,6 +76,7 @@ src/
   - `POST /api/v1/observability/policy-approvals/{approval_id}/decision`
   - `GET /api/v1/observability/policy-approvals`
   - `POST /api/v1/observability/policies/evaluate`
+  - `POST /api/v1/observability/policies/simulate`
   - `POST /api/v1/observability/detectors/run`
   - `POST /api/v1/observability/operations/run`
   - `GET /api/v1/observability/operations/status`
@@ -136,58 +100,70 @@ src/
 - `GET /metrics`
 - `GET /docs`
 
-## Quick Start (Local Development)
+## Quick Start (Local)
 
 ```bash
-# 1) Install
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2) Start infra
 cd docker
 docker compose up -d db redis
 cd ..
 
-# 3) Configure env
 cp .env.example .env
-
-# 4) Run migrations
 alembic upgrade head
-
-# 5) Start API
 uvicorn src.api.main:app --reload
 ```
 
 Open:
 
 - API docs: `http://127.0.0.1:8000/docs`
-- Observability dashboard: `http://127.0.0.1:8000/api/v1/observability/dashboard/ui`
+- Runtime dashboard UI: `http://127.0.0.1:8000/api/v1/observability/dashboard/ui`
 
-## Configuration
+## Notification Targets
 
-Use `.env` (see `.env.example`).
+AI Trace supports mixed target types in runtime and SIEM notifications:
 
-### Security
+- Generic webhook: `https://hooks.example.com/ai-trace`
+- Slack webhook URL directly: `https://hooks.slack.com/services/...`
+- Slack prefixed target: `slack:https://hooks.slack.com/services/...`
+- PagerDuty routing key: `pagerduty:<routing_key>`
+
+For SIEM exports, `notification_targets` is the preferred field. `target_webhook` remains supported as a legacy fallback.
+
+## Key Configuration
+
+Configure via `.env` (see `.env.example`).
+
+### Security and Tenancy
 
 - `API_AUTH_ENABLED`
 - `API_KEY_HEADER`
 - `API_TENANT_HEADER`
 - `API_REQUIRE_TENANT_HEADER`
-- `API_KEYS` format:
-  - `token:subject:role1|role2:org1|org2`
-  - Use `*` org for global admin keys
+- `API_KEYS` (`token:subject:role1|role2:org1|org2`; `*` org allowed)
 - `API_RATE_LIMIT_ENABLED`
 - `API_RATE_LIMIT_REQUESTS_PER_WINDOW`
 - `API_RATE_LIMIT_WINDOW_SECONDS`
 - `API_RATE_LIMIT_PER_PATH`
 
-### Scheduler + Notifications
+### Scheduler and Runtime Control
 
 - `OBSERVABILITY_SCHEDULER_ENABLED`
 - `OBSERVABILITY_SCHEDULER_ORG_IDS`
 - `OBSERVABILITY_SCHEDULER_INTERVAL_SECONDS`
+- `OBSERVABILITY_SCHEDULER_RUN_DETECTORS`
+- `OBSERVABILITY_SCHEDULER_RUN_POLICIES`
+- `OBSERVABILITY_SCHEDULER_EXECUTE_POLICY_ACTIONS`
+- `OBSERVABILITY_SCHEDULER_ENABLE_NOTIFICATIONS`
+
+### Notifications
+
 - `OBSERVABILITY_NOTIFICATION_WEBHOOKS`
+- `OBSERVABILITY_NOTIFICATION_SLACK_WEBHOOKS`
+- `OBSERVABILITY_NOTIFICATION_PAGERDUTY_ROUTING_KEYS`
+- `OBSERVABILITY_NOTIFICATION_TIMEOUT_SECONDS`
 - `OBSERVABILITY_NOTIFICATION_MAX_ATTEMPTS`
 - `OBSERVABILITY_NOTIFICATION_RETRY_BACKOFF_SECONDS`
 
@@ -196,19 +172,16 @@ Use `.env` (see `.env.example`).
 - `OBSERVABILITY_SHUTDOWN_REQUIRES_APPROVAL`
 - `OBSERVABILITY_SHUTDOWN_APPROVAL_MAX_AGE_MINUTES`
 
-## Production Deployment Checklist
+## Production Checklist
 
-1. Enable auth and tenant headers.
-2. Provision managed Postgres and Redis.
-3. Run migrations (`alembic upgrade head`) during deploy.
-4. Configure scheduler org list and notification webhooks.
-5. Enable readiness/liveness checks in orchestrator.
-6. Configure alerting on:
-   - `/health/ready != 200`
-   - operation-run failures
-   - scheduler health status != `healthy`
-   - notification delivery failures
-7. Rotate API keys and store secrets in a vault/KMS.
+1. Enable API auth, tenant enforcement, and rate limiting.
+2. Use managed Postgres + Redis with backups and rotation.
+3. Run migrations during deploy (`alembic upgrade head`).
+4. Configure scheduler org scope and notification channels.
+5. Wire readiness/liveness checks to orchestrator health gates.
+6. Alert on scheduler degradation and operation run failures.
+7. Export SIEM bundles to your security pipeline.
+8. Rotate API keys and store secrets in KMS/vault.
 
 ## Quality Gates
 
@@ -217,57 +190,12 @@ ruff check --select F src tests
 pyright
 pytest -q -p pytest_cov -p pytest_asyncio
 docker build -f docker/Dockerfile .
-```
-
-Full fresh-db e2e validation:
-
-```bash
 ./scripts/run_full_e2e.sh
 ```
 
-GitHub Actions CI is included in:
+## Current Differentiators
 
-- `.github/workflows/ci.yml`
-  - Uses `pgvector/pgvector:pg16` service image (required for migration `001` extension setup)
-  - Runs migration replay (`downgrade 001 -> upgrade head`) before tests
-  - Runs Docker build smoke validation for release artifact integrity
-
-## Recent Hardening (February 14, 2026)
-
-- Consolidated duplicate timestamp normalization logic into shared helpers (`src/utils/time.py`) and wired API/service/storage paths to it.
-- Removed duplicate UTC conversion implementations across routers, runtime service, scheduler, and storage backend to prevent drift.
-- Stabilized strict type-checking in CI with high-signal diagnostics and fixed concrete type/runtime defects in active API/runtime paths.
-- Added same-request idempotency protection in action batch ingestion (`client_event_id` duplicate rejection now covers in-request duplicates and historical duplicates).
-- Hardened scheduler reliability: one org failure no longer blocks other org runs in the same tick; failures are now tracked in scheduler status (`last_tick_failures`).
-- Enriched scheduler observability with computed health state and org failure counts in both `/api/v1/observability/operations/status` and `/metrics`.
-- Added proactive runtime risk endpoint (`GET /api/v1/observability/insights/risk`) with current-vs-previous window deltas and signal generation.
-- Extended cost summary with burn-rate forecasting (`cost_per_hour_usd`, `projected_daily_cost_usd`, per-policy `projected_exhaustion_at`).
-- Added active-session latest-action enrichment (`latest_action_type`, `latest_action_name`, `latest_action_resource`) for runtime session triage.
-- Wired dashboard UI to new runtime intelligence feeds: active session feed + risk signal panel.
-- Hardened container runtime path:
-  - non-root API image user
-  - startup entrypoint with optional migration gate (`MIGRATE_ON_START`)
-  - container healthcheck moved to `/health/live`
-  - reduced build context via `.dockerignore`
-- Added unit coverage for shared time helpers and scheduler lifecycle:
-  - `tests/unit/test_time_utils.py`
-  - `tests/unit/test_operations_scheduler.py`
-- Wired `GET /api/v1/traces/metrics/summary` into storage-backed aggregate metrics.
-- Normalized trace/span timestamp writes to naive UTC in PostgreSQL storage to avoid timezone write failures.
-- Normalized trace metrics `from/to` query timestamps to naive UTC before DB filtering.
-- Persisted `assistant_response`, `output_data`, and `error_message` in span writes.
-- Fixed trace list span counting by eager-loading spans (prevents detached-instance failures).
-- Fixed trace list pagination totals to honor `idea_id` and `correlation_id` filters.
-- Aligned `Idea` enum ORM mapping with migration-owned PostgreSQL enum types (`source_type`, `idea_status`).
-- Added trace integration e2e coverage: `tests/integration/test_traces_api.py`.
-
-## Notable Documents
-
-- `docs/phase1-observability-foundation-plan.md`
-- `/Users/demarioasquitt/Desktop/Projects/Entrepreneurial/explore/ai-trace-observability-platform-analysis.md`
-- `/Users/demarioasquitt/Desktop/Projects/Entrepreneurial/explore/playbook-status.md`
-- `/Users/demarioasquitt/Desktop/Projects/Entrepreneurial/STRATEGIC_ROADMAP.md`
-
-## License
-
-MIT
+- Runtime governance actions from policy breaches (not alert-only)
+- Memory divergence and delegation-loop detection in the same control loop
+- Policy simulation/replay endpoint for pre-production impact analysis
+- Unified operations/audit logging for manual and scheduled controls

@@ -238,6 +238,7 @@ async def root() -> dict[str, Any]:
             "observability": "/api/v1/observability",
             "observability_dashboard_ui": "/api/v1/observability/dashboard/ui",
             "observability_risk_insights": "/api/v1/observability/insights/risk",
+            "observability_policy_simulation": "/api/v1/observability/policies/simulate",
             "observability_operations_status": "/api/v1/observability/operations/status",
             "metrics": "/metrics",
             "health_live": "/health/live",

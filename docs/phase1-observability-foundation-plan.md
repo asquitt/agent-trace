@@ -28,7 +28,7 @@
 - Validation completed:
   - Migration replay in isolated virtualenv: `upgrade head -> downgrade 001 -> upgrade head` succeeded
   - Endpoint smoke checks succeeded for deployment/session/action/delegation/anomaly/dashboard/cost/memory/anomaly-list/chains paths
-  - Automated tests pass: `34 passed` (`tests/integration/test_observability_api.py`, `tests/integration/test_traces_api.py`, `tests/unit/test_tracing.py`, `tests/unit/test_tracing_decorators.py`, `tests/unit/test_observability_runtime.py`, `tests/unit/test_notifications.py`, `tests/unit/test_security.py`, `tests/unit/test_rate_limit.py`, `tests/unit/test_time_utils.py`, `tests/unit/test_operations_scheduler.py`)
+  - Automated tests pass: `38 passed` (`tests/integration/test_observability_api.py`, `tests/integration/test_traces_api.py`, `tests/unit/test_tracing.py`, `tests/unit/test_tracing_decorators.py`, `tests/unit/test_observability_runtime.py`, `tests/unit/test_notifications.py`, `tests/unit/test_security.py`, `tests/unit/test_rate_limit.py`, `tests/unit/test_time_utils.py`, `tests/unit/test_operations_scheduler.py`)
   - Trace API/storage cleanup shipped:
     - `GET /api/v1/traces/metrics/summary` implemented with storage-backed aggregates
     - trace/span timestamp normalization to naive UTC in storage layer
@@ -57,6 +57,14 @@
       - `.dockerignore` for leaner release artifacts
       - API healthcheck aligned to `/health/live`
     - CI now includes Docker build smoke validation
+    - policy simulation/replay endpoint shipped (`POST /api/v1/observability/policies/simulate`) with rollback-only execution and aggregate projection outputs
+    - policy cooldown historical-evaluation bug fixed (`triggered_at <= as_of`) so replay windows are temporally correct
+    - runtime notification transport expanded to multi-channel dispatch (webhook + Slack + PagerDuty) with channel-aware payload shaping and per-channel delivery stats
+    - scheduler and API runtime notification dispatch paths unified on the multi-channel notification engine
+    - SIEM export delivery path upgraded from webhook-only to generic notification target routing (`notification_targets` with legacy `target_webhook` compatibility)
+    - notification unit coverage extended for cross-channel routing and payload dispatch behavior
+    - integration coverage extended for policy simulation side-effect guarantees and SIEM export target validation
+    - full e2e runner re-validated after changes (`38 passed`, migration replay pass, second test pass)
 
 ## Phase 2 Runtime Control Addendum (Completed)
 
@@ -99,7 +107,7 @@
 
 ### Validation evidence
 
-- Full test suite: `34 passed`
+- Full test suite: `38 passed`
 - Live Postgres integration run: `tests/integration/test_observability_api.py` passed against isolated temporary Postgres with fresh `alembic upgrade head`
 - Verified:
   - budget breach evaluation
@@ -145,7 +153,7 @@
 
 - Fresh migration chain verified to head `006` on isolated Postgres container
 - Integration test `tests/integration/test_observability_api.py` passes against migrated DB
-- Full local suite: `34 passed`
+- Full local suite: `38 passed`
 
 ## 1. Goal
 

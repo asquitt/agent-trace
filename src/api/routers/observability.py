@@ -46,9 +46,11 @@ from ...services.observability_runtime import (
     run_anomaly_detectors,
 )
 from ...services.notifications import (
-    collect_policy_notification_targets,
-    normalize_webhook_targets,
-    send_webhook_notifications,
+    classify_notification_targets,
+    collect_policy_notification_target_strings,
+    normalize_pagerduty_routing_keys,
+    normalize_slack_webhook_targets,
+    send_runtime_notifications,
 )
 from ...utils.time import to_naive_utc, utc_now_iso, utc_now_naive
 
@@ -172,14 +174,9 @@ async def _dispatch_runtime_notifications(
     policy_summary: Optional[dict[str, Any]] = None,
     extra_targets: Optional[list[str]] = None,
 ) -> dict[str, Any]:
-    global_targets = normalize_webhook_targets(settings.observability_notification_webhooks)
-    policy_targets = collect_policy_notification_targets(policy_summary or {})
-    targets = set(global_targets)
-    for target in policy_targets:
-        targets.add(target)
-    for target in extra_targets or []:
-        targets.add(target)
-
+    raw_targets = list(settings.observability_notification_webhooks)
+    raw_targets.extend(collect_policy_notification_target_strings(policy_summary or {}))
+    raw_targets.extend(extra_targets or [])
     payload = {
         "event_type": "observability_runtime_event",
         "org_id": org_id,
@@ -187,9 +184,15 @@ async def _dispatch_runtime_notifications(
         "policy_summary": policy_summary or {},
         "occurred_at": utc_now_iso(),
     }
-    return await send_webhook_notifications(
-        sorted(targets),
+    return await send_runtime_notifications(
+        raw_targets,
         payload,
+        slack_webhooks=normalize_slack_webhook_targets(
+            settings.observability_notification_slack_webhooks
+        ),
+        pagerduty_routing_keys=normalize_pagerduty_routing_keys(
+            settings.observability_notification_pagerduty_routing_keys
+        ),
         timeout_seconds=settings.observability_notification_timeout_seconds,
         max_attempts=settings.observability_notification_max_attempts,
         retry_backoff_seconds=settings.observability_notification_retry_backoff_seconds,
@@ -559,12 +562,31 @@ class PolicyEvaluationRequest(BaseModel):
     as_of: Optional[datetime] = None
     execute_actions: bool = True
     notify: bool = True
-    extra_webhook_targets: list[str] = Field(default_factory=list)
+    extra_notification_targets: list[str] = Field(default_factory=list, alias="extra_webhook_targets")
+
+    model_config = {"populate_by_name": True}
 
 
 class PolicyEvaluationResponse(BaseModel):
     evaluation: dict[str, Any]
     notification_result: Optional[dict[str, Any]] = None
+    operation_run_id: Optional[str] = None
+
+
+class PolicySimulationRequest(BaseModel):
+    org_id: str
+    from_time: datetime = Field(alias="from")
+    to_time: datetime = Field(alias="to")
+    step_minutes: int = Field(default=60, ge=1, le=24 * 60)
+    project_actions: bool = True
+
+    model_config = {"populate_by_name": True}
+
+
+class PolicySimulationResponse(BaseModel):
+    window: dict[str, Any]
+    aggregate: dict[str, Any]
+    runs: list[dict[str, Any]]
     operation_run_id: Optional[str] = None
 
 
@@ -688,7 +710,9 @@ class DetectorRunRequest(BaseModel):
     auto_evaluate_policies: bool = True
     execute_policy_actions: bool = True
     notify: bool = True
-    extra_webhook_targets: list[str] = Field(default_factory=list)
+    extra_notification_targets: list[str] = Field(default_factory=list, alias="extra_webhook_targets")
+
+    model_config = {"populate_by_name": True}
 
 
 class DetectorRunResponse(BaseModel):
@@ -711,7 +735,9 @@ class RuntimeOperationsRunRequest(BaseModel):
     cost_spike_multiplier: float = Field(default=5.0, ge=1.0, le=100.0)
     unusual_resource_min_calls: int = Field(default=3, ge=1, le=1000)
     memory_divergence_threshold: float = Field(default=0.30, ge=0.0, le=1.0)
-    extra_webhook_targets: list[str] = Field(default_factory=list)
+    extra_notification_targets: list[str] = Field(default_factory=list, alias="extra_webhook_targets")
+
+    model_config = {"populate_by_name": True}
 
 
 class RuntimeOperationsRunResponse(BaseModel):
@@ -773,6 +799,7 @@ class SiemExportRequest(BaseModel):
     org_id: str
     from_time: datetime = Field(alias="from")
     to_time: datetime = Field(alias="to")
+    notification_targets: list[str] = Field(default_factory=list)
     target_webhook: Optional[str] = None
     dry_run: bool = True
     include_anomalies: bool = True
@@ -1816,7 +1843,7 @@ async def evaluate_policies(
             settings=settings,
             org_id=payload.org_id,
             policy_summary=summary,
-            extra_targets=payload.extra_webhook_targets,
+            extra_targets=payload.extra_notification_targets,
         )
     operation_run_id = await _store_operation_run(
         storage,
@@ -1851,6 +1878,131 @@ async def evaluate_policies(
     return PolicyEvaluationResponse(
         evaluation=summary,
         notification_result=notification_result,
+        operation_run_id=operation_run_id,
+    )
+
+
+@router.post("/policies/simulate", response_model=PolicySimulationResponse)
+async def simulate_policies(
+    payload: PolicySimulationRequest,
+    storage: StorageDep,
+    settings: SettingsDep,
+    auth: AuthDep,
+    request: Request,
+) -> PolicySimulationResponse:
+    _require_operator(auth)
+    _enforce_org_scope(auth, payload.org_id)
+    from_time = _to_db_datetime(payload.from_time)
+    to_time = _to_db_datetime(payload.to_time)
+    if to_time <= from_time:
+        raise HTTPException(status_code=400, detail="to must be greater than from")
+
+    step_seconds = max(payload.step_minutes, 1) * 60
+    total_steps = int(((to_time - from_time).total_seconds() // step_seconds) + 1)
+    if total_steps > 1000:
+        raise HTTPException(
+            status_code=400,
+            detail="simulation window too large for selected step_minutes; reduce window or increase step",
+        )
+
+    started_at = utc_now_naive()
+    cursor = from_time
+    step = timedelta(seconds=step_seconds)
+    runs: list[dict[str, Any]] = []
+    breached_steps = 0
+    total_events_projected = 0
+    total_actions_projected = 0
+    breached_policy_ids: set[str] = set()
+    first_breach_at: Optional[str] = None
+    last_breach_at: Optional[str] = None
+
+    while cursor <= to_time:
+        async with storage.session_factory() as simulation_session:
+            summary = await evaluate_budget_policies(
+                simulation_session,
+                payload.org_id,
+                as_of=cursor,
+                execute_actions=payload.project_actions,
+                require_shutdown_approval=settings.observability_shutdown_requires_approval,
+                approval_max_age_minutes=settings.observability_shutdown_approval_max_age_minutes,
+            )
+            await simulation_session.rollback()
+
+        breached_count = int(summary.get("breached_policies", 0))
+        if breached_count > 0:
+            breached_steps += 1
+            evaluated_at = str(summary.get("evaluated_at", cursor.isoformat()))
+            if first_breach_at is None:
+                first_breach_at = evaluated_at
+            last_breach_at = evaluated_at
+        total_events_projected += int(summary.get("events_created", 0))
+        total_actions_projected += int(summary.get("actions_executed", 0))
+        for result in summary.get("results", []):
+            if result.get("breaches"):
+                breached_policy_ids.add(str(result.get("policy_id")))
+
+        runs.append(
+            {
+                "as_of": cursor.isoformat(),
+                "breached_policies": breached_count,
+                "evaluation": summary,
+            }
+        )
+        cursor += step
+
+    aggregate = {
+        "breached_steps": breached_steps,
+        "clean_steps": max(len(runs) - breached_steps, 0),
+        "total_events_projected": total_events_projected,
+        "total_actions_projected": total_actions_projected,
+        "unique_breached_policy_ids": sorted(breached_policy_ids),
+        "first_breach_at": first_breach_at,
+        "last_breach_at": last_breach_at,
+        "side_effects_persisted": False,
+    }
+    window = {
+        "from": from_time.isoformat(),
+        "to": to_time.isoformat(),
+        "step_minutes": payload.step_minutes,
+        "total_steps": len(runs),
+    }
+
+    operation_run_id = await _store_operation_run(
+        storage,
+        org_id=payload.org_id,
+        run_type="api_policy_simulation",
+        started_at=started_at,
+        completed_at=utc_now_naive(),
+        success=True,
+        policy_summary={
+            "mode": "simulation",
+            "window": window,
+            "aggregate": aggregate,
+        },
+        metadata={
+            "endpoint": "/api/v1/observability/policies/simulate",
+            "project_actions": payload.project_actions,
+        },
+    )
+    await _store_audit_event(
+        storage,
+        auth=auth,
+        org_id=payload.org_id,
+        action="policy_simulate",
+        resource_type="org",
+        resource_id=payload.org_id,
+        request_id=_request_id(request),
+        details={
+            "operation_run_id": operation_run_id,
+            "window": window,
+            "aggregate": aggregate,
+            "project_actions": payload.project_actions,
+        },
+    )
+    return PolicySimulationResponse(
+        window=window,
+        aggregate=aggregate,
+        runs=runs,
         operation_run_id=operation_run_id,
     )
 
@@ -2053,7 +2205,7 @@ async def run_detectors(
             org_id=payload.org_id,
             detector_summary=detector_summary,
             policy_summary=policy_evaluation,
-            extra_targets=payload.extra_webhook_targets,
+            extra_targets=payload.extra_notification_targets,
         )
     operation_run_id = await _store_operation_run(
         storage,
@@ -2145,7 +2297,7 @@ async def run_operations_cycle(
             org_id=payload.org_id,
             detector_summary=detector_summary,
             policy_summary=policy_summary,
-            extra_targets=payload.extra_webhook_targets,
+            extra_targets=payload.extra_notification_targets,
         )
     operation_run_id = await _store_operation_run(
         storage,
@@ -2512,15 +2664,39 @@ async def export_siem_events(
     }
 
     notification_result: Optional[dict[str, Any]] = None
+    normalized_targets: list[str] = []
     if not payload.dry_run:
-        if not payload.target_webhook:
+        requested_targets = list(payload.notification_targets)
+        if payload.target_webhook:
+            requested_targets.append(payload.target_webhook)
+        normalized_targets = sorted({item.strip() for item in requested_targets if item and item.strip()})
+        if not normalized_targets:
             raise HTTPException(
                 status_code=400,
-                detail="target_webhook is required when dry_run=false",
+                detail=(
+                    "notification_targets (or legacy target_webhook) is required "
+                    "when dry_run=false"
+                ),
             )
-        notification_result = await send_webhook_notifications(
-            [payload.target_webhook],
+        classified_targets = classify_notification_targets(normalized_targets)
+        if (
+            not classified_targets.webhooks
+            and not classified_targets.slack_webhooks
+            and not classified_targets.pagerduty_routing_keys
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "notification_targets must include at least one valid target: "
+                    "HTTP(S) webhook URL, Slack webhook URL, slack:<webhook>, or "
+                    "pagerduty:<routing_key>"
+                ),
+            )
+        notification_result = await send_runtime_notifications(
+            normalized_targets,
             export_payload,
+            slack_webhooks=[],
+            pagerduty_routing_keys=[],
             timeout_seconds=settings.observability_notification_timeout_seconds,
             max_attempts=settings.observability_notification_max_attempts,
             retry_backoff_seconds=settings.observability_notification_retry_backoff_seconds,
@@ -2538,7 +2714,8 @@ async def export_siem_events(
             "export_id": export_id,
             "counts": counts,
             "dry_run": payload.dry_run,
-            "has_target_webhook": bool(payload.target_webhook),
+            "notification_target_count": len(normalized_targets),
+            "has_legacy_target_webhook": bool(payload.target_webhook),
         },
     )
 

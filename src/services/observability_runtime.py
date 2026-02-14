@@ -432,7 +432,10 @@ async def evaluate_budget_policies(
 
         latest_event_query = (
             select(BudgetPolicyEvent)
-            .where(BudgetPolicyEvent.policy_id == policy.id)
+            .where(
+                BudgetPolicyEvent.policy_id == policy.id,
+                BudgetPolicyEvent.triggered_at <= now,
+            )
             .order_by(desc(BudgetPolicyEvent.triggered_at))
             .limit(1)
         )

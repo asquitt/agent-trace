@@ -11,7 +11,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from ..config import Settings
 from ..models.observability import ObservabilityOperationRun, SystemAuditEvent
 from ..utils.time import utc_now_iso, utc_now_naive
-from .notifications import collect_policy_notification_targets, send_webhook_notifications
+from .notifications import (
+    collect_policy_notification_target_strings,
+    normalize_pagerduty_routing_keys,
+    normalize_slack_webhook_targets,
+    send_runtime_notifications,
+)
 from .observability_runtime import (
     DetectorConfig,
     evaluate_budget_policies,
@@ -184,9 +189,8 @@ class ObservabilityOperationsScheduler:
                 await session.commit()
 
             if self._settings.observability_scheduler_enable_notifications:
-                targets = set(self._settings.observability_notification_webhooks)
-                for target in collect_policy_notification_targets(policy_summary):
-                    targets.add(target)
+                targets = list(self._settings.observability_notification_webhooks)
+                targets.extend(collect_policy_notification_target_strings(policy_summary))
                 notification_payload = {
                     "event_type": "observability_scheduler_run",
                     "org_id": org_id,
@@ -194,9 +198,15 @@ class ObservabilityOperationsScheduler:
                     "detector_summary": detector_summary,
                     "policy_summary": policy_summary,
                 }
-                notification_result = await send_webhook_notifications(
-                    sorted(targets),
+                notification_result = await send_runtime_notifications(
+                    targets,
                     notification_payload,
+                    slack_webhooks=normalize_slack_webhook_targets(
+                        self._settings.observability_notification_slack_webhooks
+                    ),
+                    pagerduty_routing_keys=normalize_pagerduty_routing_keys(
+                        self._settings.observability_notification_pagerduty_routing_keys
+                    ),
                     timeout_seconds=self._settings.observability_notification_timeout_seconds,
                     max_attempts=self._settings.observability_notification_max_attempts,
                     retry_backoff_seconds=self._settings.observability_notification_retry_backoff_seconds,

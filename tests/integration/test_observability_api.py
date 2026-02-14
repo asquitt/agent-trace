@@ -220,6 +220,29 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     )
     assert policy_events_resp.status_code == 200
     assert policy_events_resp.json()["total"] >= 1
+    policy_events_before_simulation = policy_events_resp.json()["total"]
+
+    simulation_resp = client.post(
+        "/api/v1/observability/policies/simulate",
+        json={
+            "org_id": org_id,
+            "from": from_ts,
+            "to": to_ts,
+            "step_minutes": 1,
+            "project_actions": True,
+        },
+    )
+    assert simulation_resp.status_code == 200
+    assert simulation_resp.json()["window"]["total_steps"] >= 1
+    assert simulation_resp.json()["aggregate"]["side_effects_persisted"] is False
+    assert simulation_resp.json()["operation_run_id"] is not None
+
+    policy_events_after_simulation_resp = client.get(
+        "/api/v1/observability/budget-policies/events",
+        params={"org_id": org_id, "from": from_ts, "to": to_ts},
+    )
+    assert policy_events_after_simulation_resp.status_code == 200
+    assert policy_events_after_simulation_resp.json()["total"] == policy_events_before_simulation
 
     anomaly_resp = client.post(
         "/api/v1/observability/anomalies",
@@ -342,6 +365,18 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     assert "scheduler" in metrics_resp.json()
     assert "health" in metrics_resp.json()["scheduler"]
 
+    siem_export_missing_target_resp = client.post(
+        "/api/v1/observability/exports/siem",
+        json={
+            "org_id": org_id,
+            "from": from_ts,
+            "to": to_ts,
+            "dry_run": False,
+        },
+    )
+    assert siem_export_missing_target_resp.status_code == 400
+    assert "notification_targets" in siem_export_missing_target_resp.json()["detail"]
+
     siem_export_resp = client.post(
         "/api/v1/observability/exports/siem",
         json={
@@ -349,6 +384,10 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
             "from": from_ts,
             "to": to_ts,
             "dry_run": True,
+            "notification_targets": [
+                "https://hooks.example.com/siem",
+                "pagerduty:siem-routing-key",
+            ],
             "include_anomalies": True,
             "include_policy_events": True,
             "include_operation_runs": True,
