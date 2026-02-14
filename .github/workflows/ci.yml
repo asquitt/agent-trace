@@ -57,3 +57,6 @@ jobs:
 
       - name: Test
         run: pytest -q -p pytest_cov -p pytest_asyncio
+
+      - name: Docker Build Smoke
+        run: docker build -f docker/Dockerfile .
