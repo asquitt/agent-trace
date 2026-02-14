@@ -401,6 +401,16 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     assert detector_rerun_resp.json()["notification_result"]["skipped"] is True
     assert detector_rerun_resp.json()["notification_result"]["skip_reason"] == "no_actionable_findings"
 
+    post_rerun_groups_resp = client.get(
+        "/api/v1/observability/anomalies/groups",
+        params={"org_id": org_id, "from": from_ts, "to": to_ts},
+    )
+    assert post_rerun_groups_resp.status_code == 200
+    post_rerun_groups = post_rerun_groups_resp.json()["groups"]
+    assert any(
+        group["total_occurrences"] > group["anomaly_count"] for group in post_rerun_groups
+    )
+
     ops_resp = client.post(
         "/api/v1/observability/operations/run",
         json={
