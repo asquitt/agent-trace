@@ -1,0 +1,41 @@
+name: Production Gates
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * 1"
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Security Gate
+        run: ./scripts/security_gate.sh
+
+      - name: Backup/Restore Drill
+        run: ./scripts/backup_restore_drill.sh
+
+      - name: Performance Gate
+        run: ./scripts/run_perf_gate.sh
+
+      - name: Upload gate reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-gate-reports
+          path: |
+            docs/reports/security/**
+            docs/reports/dr/**
+            docs/reports/perf/**

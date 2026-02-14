@@ -23,7 +23,7 @@ def test_parse_anomaly_group_fingerprint_with_deployment_scope() -> None:
 
 def test_parse_anomaly_group_fingerprint_with_none_deployment_scope() -> None:
     anomaly_type, deployment_id, title_scope = _parse_anomaly_group_fingerprint(
-        "cost_spike:none:daily cost burst"
+        "cost_spike:no-deploy:daily cost burst"
     )
     assert anomaly_type == AnomalyType.COST_SPIKE
     assert deployment_id is None

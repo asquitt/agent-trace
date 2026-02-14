@@ -85,7 +85,7 @@ class Settings(BaseSettings):
 
     # Server
     service_name: str = Field(default="ai-trace")
-    host: str = Field(default="0.0.0.0")
+    host: str = Field(default="127.0.0.1")
     port: int = Field(default=8000)
     debug: bool = Field(default=False)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(default="INFO")

@@ -80,10 +80,15 @@ def run_preflight(settings: Settings) -> list[CheckResult]:
 
 def print_results(results: list[CheckResult]) -> None:
     """Print preflight check results in a compact human-readable form."""
-    status_counts = {"pass": 0, "warn": 0, "fail": 0}
+    status_counts = {"ok": 0, "warn": 0, "error": 0}
     for result in results:
-        status_counts[result.status] += 1
+        if result.status == "pass":
+            status_counts["ok"] += 1
+        elif result.status == "warn":
+            status_counts["warn"] += 1
+        else:
+            status_counts["error"] += 1
         print(f"[{result.status.upper()}] {result.message}")
     print(
-        f"\nSummary: pass={status_counts['pass']} warn={status_counts['warn']} fail={status_counts['fail']}"
+        f"\nSummary: pass={status_counts['ok']} warn={status_counts['warn']} fail={status_counts['error']}"
     )

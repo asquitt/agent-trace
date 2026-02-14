@@ -74,6 +74,8 @@ _ANOMALY_SEVERITY_RANK = {
     "critical": 4,
 }
 
+_ANOMALY_DEPLOYMENT_NONE = "no-deploy"
+
 
 def _anomaly_severity_rank(severity: str) -> int:
     return _ANOMALY_SEVERITY_RANK.get(str(severity).strip().lower(), 1)
@@ -92,7 +94,7 @@ def _parse_stats_datetime(value: Any) -> Optional[datetime]:
 
 def _anomaly_group_fingerprint(anomaly: AnomalyEvent) -> str:
     anomaly_type = _enum_str(anomaly.anomaly_type).strip().lower()
-    deployment_scope = str(anomaly.deployment_id) if anomaly.deployment_id else "none"
+    deployment_scope = str(anomaly.deployment_id) if anomaly.deployment_id else _ANOMALY_DEPLOYMENT_NONE
     title_scope = anomaly.title.strip().lower()
     return f"{anomaly_type}:{deployment_scope}:{title_scope}"
 
@@ -117,7 +119,7 @@ def _parse_anomaly_group_fingerprint(fingerprint: str) -> tuple[AnomalyType, UUI
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Fingerprint title scope cannot be empty",
         )
-    if deployment_token == "none":
+    if deployment_token == _ANOMALY_DEPLOYMENT_NONE:
         deployment_id = None
     else:
         try:
