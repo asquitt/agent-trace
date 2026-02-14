@@ -187,6 +187,12 @@ Configure via `.env` (see `.env.example`).
 - `OBSERVABILITY_SHUTDOWN_REQUIRES_APPROVAL`
 - `OBSERVABILITY_SHUTDOWN_APPROVAL_MAX_AGE_MINUTES`
 
+### Container Startup Guards
+
+- `MIGRATE_ON_START`
+- `PREFLIGHT_ON_START`
+- `PREFLIGHT_STRICT`
+
 ## Production Checklist
 
 1. Enable API auth, tenant enforcement, and rate limiting.

@@ -70,7 +70,7 @@
     - severity-threshold notification gating shipped (`OBSERVABILITY_NOTIFICATION_MIN_SEVERITY`) to prevent low-signal runtime alerts
     - grouped anomaly backlog endpoint shipped (`GET /api/v1/observability/anomalies/groups`) with status counts and occurrence rollups
     - in-memory rate limiter hardened with stale-key pruning plus max-key eviction guardrails (`API_RATE_LIMIT_MAX_KEYS`) to prevent idle and high-cardinality memory growth under long-running API processes
-    - deployment preflight script added (`scripts/production_preflight.py`) to gate critical security/runtime configuration before production rollout
+    - deployment preflight checks added (`scripts/production_preflight.py`, `python -m src.cli.production_preflight`) with optional container startup enforcement (`PREFLIGHT_ON_START`, `PREFLIGHT_STRICT`)
     - integration coverage extended for repeated detector runs (`created_anomalies` then `deduplicated_anomalies`) on delegation-loop anomalies
     - full e2e runner re-validated after changes (`50 passed`, migration replay pass, second test pass)
 
