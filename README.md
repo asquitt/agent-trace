@@ -28,8 +28,8 @@ AI Trace extends classic LLM tracing into a control plane:
 - Validation evidence:
   - `ruff check --select F src tests` passed
   - `pyright` passed (`0 errors`)
-  - `pytest -q` passed (`45 passed, 2 skipped`) in lightweight local run
-  - `./scripts/run_full_e2e.sh` passed (`47 passed`, fresh DB, migration replay, double test pass)
+  - `pytest -q` passed (`48 passed, 2 skipped`) in lightweight local run
+  - `./scripts/run_full_e2e.sh` passed (`50 passed`, fresh DB, migration replay, double test pass)
 
 ## Architecture
 
@@ -197,10 +197,12 @@ Configure via `.env` (see `.env.example`).
 6. Alert on scheduler degradation and operation run failures.
 7. Export SIEM bundles to your security pipeline.
 8. Rotate API keys and store secrets in KMS/vault.
+9. Run preflight checks before deploy (`python scripts/production_preflight.py`).
 
 ## Quality Gates
 
 ```bash
+python scripts/production_preflight.py
 ruff check --select F src tests
 pyright
 pytest -q -p pytest_cov -p pytest_asyncio
