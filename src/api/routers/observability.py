@@ -1,16 +1,16 @@
 """Observability API endpoints for fleet/session/runtime monitoring."""
 
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import case, desc, func, or_, select
 
-from ...dependencies import SettingsDep, StorageDep
+from ...dependencies import AuthDep, SettingsDep, StorageDep
 from ...models.observability import (
     ActionType,
     AgentAction,
@@ -30,10 +30,13 @@ from ...models.observability import (
     MemoryConsistencyState,
     MemorySnapshot,
     ObservabilityOperationRun,
+    PolicyActionApproval,
+    PolicyApprovalStatus,
     PolicyActionType,
     PolicyStatus,
     SessionStatus,
 )
+from ...security import AuthContext, require_org_access, require_roles
 from ...models.trace import AITrace
 from ...services.observability_runtime import (
     DetectorConfig,
@@ -77,6 +80,22 @@ def _normalize_bucket(dt: datetime, granularity: str) -> datetime:
     # 5m default
     minute = (dt.minute // 5) * 5
     return dt.replace(minute=minute, second=0, microsecond=0)
+
+
+def _require_viewer(auth: AuthContext) -> None:
+    require_roles(auth, "viewer", "operator", "admin")
+
+
+def _require_operator(auth: AuthContext) -> None:
+    require_roles(auth, "operator", "admin")
+
+
+def _require_admin(auth: AuthContext) -> None:
+    require_roles(auth, "admin")
+
+
+def _enforce_org_scope(auth: AuthContext, org_id: str) -> None:
+    require_org_access(auth, org_id)
 
 
 async def _dispatch_runtime_notifications(
@@ -398,6 +417,44 @@ class BudgetPolicyEventListResponse(BaseModel):
     has_more: bool
 
 
+class PolicyApprovalCreateRequest(BaseModel):
+    org_id: str
+    policy_id: UUID
+    requested_by: Optional[str] = None
+    expires_at: Optional[datetime] = None
+    reason: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PolicyApprovalDecisionRequest(BaseModel):
+    decision: PolicyApprovalStatus
+    decided_by: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class PolicyApprovalResponse(BaseModel):
+    id: str
+    org_id: str
+    policy_id: str
+    action_type: str
+    status: str
+    requested_by: Optional[str] = None
+    requested_at: datetime
+    expires_at: Optional[datetime] = None
+    decided_by: Optional[str] = None
+    decided_at: Optional[datetime] = None
+    decision_reason: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PolicyApprovalListResponse(BaseModel):
+    approvals: list[PolicyApprovalResponse]
+    total: int
+    page: int
+    page_size: int
+    has_more: bool
+
+
 class PolicyEvaluationRequest(BaseModel):
     org_id: str
     as_of: Optional[datetime] = None
@@ -708,11 +765,31 @@ def _operation_run_response(row: ObservabilityOperationRun) -> OperationRunRespo
     )
 
 
+def _policy_approval_response(row: PolicyActionApproval) -> PolicyApprovalResponse:
+    return PolicyApprovalResponse(
+        id=str(row.id),
+        org_id=row.org_id,
+        policy_id=str(row.policy_id),
+        action_type=_enum_str(row.action_type),
+        status=_enum_str(row.status),
+        requested_by=row.requested_by,
+        requested_at=row.requested_at,
+        expires_at=row.expires_at,
+        decided_by=row.decided_by,
+        decided_at=row.decided_at,
+        decision_reason=row.decision_reason,
+        metadata=row.approval_metadata or {},
+    )
+
+
 @router.post("/deployments", response_model=DeploymentResponse, status_code=201)
 async def upsert_deployment(
     payload: DeploymentUpsertRequest,
     storage: StorageDep,
+    auth: AuthDep,
 ) -> DeploymentResponse:
+    _require_operator(auth)
+    _enforce_org_scope(auth, payload.org_id)
     async with storage.session_factory() as session:
         result = await session.execute(
             select(AgentDeployment).where(
@@ -754,12 +831,22 @@ async def upsert_deployment(
 @router.get("/deployments", response_model=DeploymentListResponse)
 async def list_deployments(
     storage: StorageDep,
+    auth: AuthDep,
     org_id: Optional[str] = Query(None),
     environment: Optional[DeploymentEnvironment] = Query(None),
     is_active: Optional[bool] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ) -> DeploymentListResponse:
+    _require_viewer(auth)
+    if org_id:
+        _enforce_org_scope(auth, org_id)
+    elif not auth.is_global_admin:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="org_id is required for non-global-admin access",
+        )
+
     offset = (page - 1) * page_size
     async with storage.session_factory() as session:
         query = select(AgentDeployment).order_by(AgentDeployment.created_at.desc())
@@ -799,7 +886,9 @@ async def list_deployments(
 async def create_session(
     payload: SessionCreateRequest,
     storage: StorageDep,
+    auth: AuthDep,
 ) -> SessionResponse:
+    _require_operator(auth)
     started_at = _to_db_datetime(payload.started_at)
     if started_at is None:
         raise HTTPException(status_code=400, detail="started_at is required")
@@ -808,6 +897,7 @@ async def create_session(
         deployment = await session.get(AgentDeployment, payload.deployment_id)
         if not deployment:
             raise HTTPException(status_code=404, detail="Deployment not found")
+        _enforce_org_scope(auth, deployment.org_id)
 
         session_row = AgentSession(
             deployment_id=payload.deployment_id,
@@ -834,11 +924,17 @@ async def update_session(
     session_id: UUID,
     payload: SessionUpdateRequest,
     storage: StorageDep,
+    auth: AuthDep,
 ) -> SessionResponse:
+    _require_operator(auth)
     async with storage.session_factory() as session:
         session_row = await session.get(AgentSession, session_id)
         if not session_row:
             raise HTTPException(status_code=404, detail="Session not found")
+        deployment = await session.get(AgentDeployment, session_row.deployment_id)
+        if deployment is None:
+            raise HTTPException(status_code=404, detail="Deployment not found")
+        _enforce_org_scope(auth, deployment.org_id)
 
         if payload.status is not None:
             session_row.status = payload.status
@@ -862,12 +958,15 @@ async def update_session(
 @router.get("/sessions/active", response_model=ActiveSessionListResponse)
 async def list_active_sessions(
     storage: StorageDep,
+    auth: AuthDep,
     org_id: str = Query(...),
     deployment_id: Optional[UUID] = Query(None),
     agent_id: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ) -> ActiveSessionListResponse:
+    _require_viewer(auth)
+    _enforce_org_scope(auth, org_id)
     offset = (page - 1) * page_size
     now = _utcnow_naive()
 
@@ -933,12 +1032,19 @@ async def list_active_sessions(
 async def ingest_action_batch(
     payload: ActionBatchRequest,
     storage: StorageDep,
+    settings: SettingsDep,
+    auth: AuthDep,
     evaluate_policies_flag: bool = Query(True, alias="evaluate_policies"),
 ) -> BatchIngestResponse:
+    _require_operator(auth)
     async with storage.session_factory() as session:
         session_row = await session.get(AgentSession, payload.session_id)
         if not session_row:
             raise HTTPException(status_code=404, detail="Session not found")
+        deployment = await session.get(AgentDeployment, session_row.deployment_id)
+        if deployment is None:
+            raise HTTPException(status_code=404, detail="Deployment not found")
+        _enforce_org_scope(auth, deployment.org_id)
 
         existing_client_ids: set[UUID] = set()
         incoming_client_ids = [e.client_event_id for e in payload.events if e.client_event_id is not None]
@@ -996,13 +1102,14 @@ async def ingest_action_batch(
 
         policy_evaluation: Optional[dict[str, Any]] = None
         if evaluate_policies_flag:
-            deployment = await session.get(AgentDeployment, session_row.deployment_id)
             if deployment:
                 policy_evaluation = await evaluate_budget_policies(
                     session,
                     deployment.org_id,
                     as_of=latest_event or _utcnow_naive(),
                     execute_actions=True,
+                    require_shutdown_approval=settings.observability_shutdown_requires_approval,
+                    approval_max_age_minutes=settings.observability_shutdown_approval_max_age_minutes,
                 )
 
         await session.commit()
@@ -1019,12 +1126,24 @@ async def ingest_action_batch(
 async def create_delegation(
     payload: DelegationCreateRequest,
     storage: StorageDep,
+    auth: AuthDep,
 ) -> DelegationResponse:
+    _require_operator(auth)
     async with storage.session_factory() as session:
         parent = await session.get(AgentSession, payload.parent_session_id)
         child = await session.get(AgentSession, payload.child_session_id)
         if not parent or not child:
             raise HTTPException(status_code=404, detail="Parent or child session not found")
+        parent_deployment = await session.get(AgentDeployment, parent.deployment_id)
+        child_deployment = await session.get(AgentDeployment, child.deployment_id)
+        if parent_deployment is None or child_deployment is None:
+            raise HTTPException(status_code=404, detail="Parent or child deployment not found")
+        if parent_deployment.org_id != child_deployment.org_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Parent and child sessions must belong to the same org",
+            )
+        _enforce_org_scope(auth, parent_deployment.org_id)
         if payload.trace_id:
             trace = await session.get(AITrace, payload.trace_id)
             if not trace:
@@ -1073,11 +1192,17 @@ async def create_delegation(
 async def ingest_memory_snapshots(
     payload: MemoryBatchRequest,
     storage: StorageDep,
+    auth: AuthDep,
 ) -> MemoryBatchResponse:
+    _require_operator(auth)
     async with storage.session_factory() as session:
         session_row = await session.get(AgentSession, payload.session_id)
         if not session_row:
             raise HTTPException(status_code=404, detail="Session not found")
+        deployment = await session.get(AgentDeployment, session_row.deployment_id)
+        if deployment is None:
+            raise HTTPException(status_code=404, detail="Deployment not found")
+        _enforce_org_scope(auth, deployment.org_id)
 
         accepted = 0
         rejected = 0
@@ -1121,7 +1246,10 @@ async def ingest_memory_snapshots(
 async def create_budget_policy(
     payload: BudgetPolicyCreateRequest,
     storage: StorageDep,
+    auth: AuthDep,
 ) -> BudgetPolicyResponse:
+    _require_admin(auth)
+    _enforce_org_scope(auth, payload.org_id)
     async with storage.session_factory() as session:
         if payload.scope_type == BudgetScopeType.DEPLOYMENT and payload.deployment_id is None:
             raise HTTPException(status_code=400, detail="deployment_id required for deployment scope")
@@ -1157,6 +1285,7 @@ async def create_budget_policy(
 @router.get("/budget-policies", response_model=BudgetPolicyListResponse)
 async def list_budget_policies(
     storage: StorageDep,
+    auth: AuthDep,
     org_id: str = Query(...),
     deployment_id: Optional[UUID] = Query(None),
     agent_id: Optional[str] = Query(None),
@@ -1164,6 +1293,8 @@ async def list_budget_policies(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ) -> BudgetPolicyListResponse:
+    _require_viewer(auth)
+    _enforce_org_scope(auth, org_id)
     offset = (page - 1) * page_size
     async with storage.session_factory() as session:
         query = select(BudgetPolicy).where(BudgetPolicy.org_id == org_id).order_by(
@@ -1201,6 +1332,7 @@ async def list_budget_policies(
 @router.get("/budget-policies/events", response_model=BudgetPolicyEventListResponse)
 async def list_budget_policy_events(
     storage: StorageDep,
+    auth: AuthDep,
     org_id: str = Query(...),
     policy_id: Optional[UUID] = Query(None),
     from_time: Optional[datetime] = Query(None, alias="from"),
@@ -1208,6 +1340,8 @@ async def list_budget_policy_events(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ) -> BudgetPolicyEventListResponse:
+    _require_viewer(auth)
+    _enforce_org_scope(auth, org_id)
     from_time = _to_db_datetime(from_time)
     to_time = _to_db_datetime(to_time)
     offset = (page - 1) * page_size
@@ -1250,12 +1384,143 @@ async def list_budget_policy_events(
         )
 
 
+@router.post("/policy-approvals", response_model=PolicyApprovalResponse, status_code=201)
+async def create_policy_approval(
+    payload: PolicyApprovalCreateRequest,
+    storage: StorageDep,
+    settings: SettingsDep,
+    auth: AuthDep,
+) -> PolicyApprovalResponse:
+    _require_operator(auth)
+    _enforce_org_scope(auth, payload.org_id)
+    requested_at = _utcnow_naive()
+    expires_at = _to_db_datetime(payload.expires_at) or (
+        requested_at.replace(microsecond=0)
+        + timedelta(minutes=settings.observability_shutdown_approval_max_age_minutes)
+    )
+
+    async with storage.session_factory() as session:
+        policy = await session.get(BudgetPolicy, payload.policy_id)
+        if policy is None:
+            raise HTTPException(status_code=404, detail="Budget policy not found")
+        if policy.org_id != payload.org_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="policy_id org does not match payload org_id",
+            )
+
+        row = PolicyActionApproval(
+            org_id=payload.org_id,
+            policy_id=policy.id,
+            action_type=policy.action_on_breach,
+            status=PolicyApprovalStatus.PENDING,
+            requested_by=payload.requested_by or auth.subject,
+            requested_at=requested_at,
+            expires_at=expires_at,
+            approval_metadata={
+                **payload.metadata,
+                "reason": payload.reason,
+                "requested_by_subject": auth.subject,
+            },
+        )
+        session.add(row)
+        await session.commit()
+        await session.refresh(row)
+        return _policy_approval_response(row)
+
+
+@router.post("/policy-approvals/{approval_id}/decision", response_model=PolicyApprovalResponse)
+async def decide_policy_approval(
+    approval_id: UUID,
+    payload: PolicyApprovalDecisionRequest,
+    storage: StorageDep,
+    auth: AuthDep,
+) -> PolicyApprovalResponse:
+    _require_admin(auth)
+    if payload.decision not in {PolicyApprovalStatus.APPROVED, PolicyApprovalStatus.REJECTED}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="decision must be approved or rejected",
+        )
+
+    now = _utcnow_naive()
+    async with storage.session_factory() as session:
+        row = await session.get(PolicyActionApproval, approval_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Policy approval not found")
+        _enforce_org_scope(auth, row.org_id)
+
+        if row.expires_at and row.expires_at < now and row.status == PolicyApprovalStatus.PENDING:
+            row.status = PolicyApprovalStatus.EXPIRED
+            row.decided_at = now
+            row.decision_reason = "Approval expired before decision"
+            await session.commit()
+            await session.refresh(row)
+            return _policy_approval_response(row)
+
+        row.status = payload.decision
+        row.decided_by = payload.decided_by or auth.subject
+        row.decided_at = now
+        row.decision_reason = payload.reason
+        await session.commit()
+        await session.refresh(row)
+        return _policy_approval_response(row)
+
+
+@router.get("/policy-approvals", response_model=PolicyApprovalListResponse)
+async def list_policy_approvals(
+    storage: StorageDep,
+    auth: AuthDep,
+    org_id: str = Query(...),
+    policy_id: Optional[UUID] = Query(None),
+    status_filter: Optional[PolicyApprovalStatus] = Query(None, alias="status"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+) -> PolicyApprovalListResponse:
+    _require_viewer(auth)
+    _enforce_org_scope(auth, org_id)
+    offset = (page - 1) * page_size
+
+    async with storage.session_factory() as session:
+        query = (
+            select(PolicyActionApproval)
+            .where(PolicyActionApproval.org_id == org_id)
+            .order_by(desc(PolicyActionApproval.requested_at))
+        )
+        count_q = select(func.count(PolicyActionApproval.id)).where(
+            PolicyActionApproval.org_id == org_id
+        )
+
+        if policy_id:
+            query = query.where(PolicyActionApproval.policy_id == policy_id)
+            count_q = count_q.where(PolicyActionApproval.policy_id == policy_id)
+        if status_filter:
+            query = query.where(PolicyActionApproval.status == status_filter.value)
+            count_q = count_q.where(PolicyActionApproval.status == status_filter.value)
+
+        rows = list((await session.execute(query.limit(page_size + 1).offset(offset))).scalars().all())
+        has_more = len(rows) > page_size
+        rows = rows[:page_size]
+        total = int((await session.execute(count_q)).scalar() or 0)
+
+        return PolicyApprovalListResponse(
+            approvals=[_policy_approval_response(row) for row in rows],
+            total=total,
+            page=page,
+            page_size=page_size,
+            has_more=has_more,
+        )
+
+
 @router.post("/policies/evaluate", response_model=PolicyEvaluationResponse)
 async def evaluate_policies(
     payload: PolicyEvaluationRequest,
     storage: StorageDep,
     settings: SettingsDep,
+    auth: AuthDep,
 ) -> PolicyEvaluationResponse:
+    _require_operator(auth)
+    _enforce_org_scope(auth, payload.org_id)
     started_at = _utcnow_naive()
     notification_result: Optional[dict[str, Any]] = None
     async with storage.session_factory() as session:
@@ -1264,6 +1529,8 @@ async def evaluate_policies(
             payload.org_id,
             as_of=_to_db_datetime(payload.as_of),
             execute_actions=payload.execute_actions,
+            require_shutdown_approval=settings.observability_shutdown_requires_approval,
+            approval_max_age_minutes=settings.observability_shutdown_approval_max_age_minutes,
         )
         await session.commit()
     if payload.notify:
@@ -1299,7 +1566,9 @@ async def evaluate_policies(
 async def create_anomaly(
     payload: AnomalyCreateRequest,
     storage: StorageDep,
+    auth: AuthDep,
 ) -> AnomalyResponse:
+    _require_operator(auth)
     async with storage.session_factory() as session:
         deployment_id = payload.deployment_id
         if deployment_id is None and payload.session_id is not None:
@@ -1311,6 +1580,10 @@ async def create_anomaly(
                 status_code=400,
                 detail="deployment_id required directly or derivable from session_id",
             )
+        deployment = await session.get(AgentDeployment, deployment_id)
+        if deployment is None:
+            raise HTTPException(status_code=404, detail="Deployment not found")
+        _enforce_org_scope(auth, deployment.org_id)
 
         row = AnomalyEvent(
             deployment_id=deployment_id,
@@ -1341,12 +1614,23 @@ async def update_anomaly(
     anomaly_id: UUID,
     payload: AnomalyUpdateRequest,
     storage: StorageDep,
+    auth: AuthDep,
 ) -> AnomalyResponse:
+    _require_operator(auth)
     now = _utcnow_naive()
     async with storage.session_factory() as session:
         row = await session.get(AnomalyEvent, anomaly_id)
         if not row:
             raise HTTPException(status_code=404, detail="Anomaly not found")
+        if row.deployment_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Anomaly has no deployment scope",
+            )
+        deployment = await session.get(AgentDeployment, row.deployment_id)
+        if deployment is None:
+            raise HTTPException(status_code=404, detail="Deployment not found")
+        _enforce_org_scope(auth, deployment.org_id)
 
         row.status = payload.status
         row.note = payload.note
@@ -1366,6 +1650,7 @@ async def update_anomaly(
 @router.get("/anomalies", response_model=AnomalyListResponse)
 async def list_anomalies(
     storage: StorageDep,
+    auth: AuthDep,
     org_id: str = Query(...),
     status: Optional[AnomalyStatus] = Query(None),
     severity: Optional[AnomalySeverity] = Query(None),
@@ -1375,6 +1660,8 @@ async def list_anomalies(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ) -> AnomalyListResponse:
+    _require_viewer(auth)
+    _enforce_org_scope(auth, org_id)
     from_time = _to_db_datetime(from_time)
     to_time = _to_db_datetime(to_time)
     if from_time is None or to_time is None:
@@ -1433,7 +1720,10 @@ async def run_detectors(
     payload: DetectorRunRequest,
     storage: StorageDep,
     settings: SettingsDep,
+    auth: AuthDep,
 ) -> DetectorRunResponse:
+    _require_operator(auth)
+    _enforce_org_scope(auth, payload.org_id)
     started_at = _utcnow_naive()
     config = DetectorConfig(
         current_window_minutes=payload.current_window_minutes,
@@ -1459,6 +1749,8 @@ async def run_detectors(
                 payload.org_id,
                 as_of=_to_db_datetime(payload.as_of),
                 execute_actions=payload.execute_policy_actions,
+                require_shutdown_approval=settings.observability_shutdown_requires_approval,
+                approval_max_age_minutes=settings.observability_shutdown_approval_max_age_minutes,
             )
 
         await session.commit()
@@ -1501,7 +1793,10 @@ async def run_operations_cycle(
     payload: RuntimeOperationsRunRequest,
     storage: StorageDep,
     settings: SettingsDep,
+    auth: AuthDep,
 ) -> RuntimeOperationsRunResponse:
+    _require_operator(auth)
+    _enforce_org_scope(auth, payload.org_id)
     started_at = _utcnow_naive()
     detector_summary: dict[str, Any] = {}
     policy_summary: dict[str, Any] = {}
@@ -1529,6 +1824,8 @@ async def run_operations_cycle(
                 payload.org_id,
                 as_of=_to_db_datetime(payload.as_of),
                 execute_actions=payload.execute_policy_actions,
+                require_shutdown_approval=settings.observability_shutdown_requires_approval,
+                approval_max_age_minutes=settings.observability_shutdown_approval_max_age_minutes,
             )
         await session.commit()
 
@@ -1569,7 +1866,8 @@ async def run_operations_cycle(
 
 
 @router.get("/operations/status", response_model=RuntimeOperationsStatusResponse)
-async def get_operations_status(request: Request) -> RuntimeOperationsStatusResponse:
+async def get_operations_status(request: Request, auth: AuthDep) -> RuntimeOperationsStatusResponse:
+    _require_viewer(auth)
     scheduler = getattr(request.app.state, "observability_scheduler", None)
     if scheduler is None:
         return RuntimeOperationsStatusResponse(
@@ -1585,6 +1883,7 @@ async def get_operations_status(request: Request) -> RuntimeOperationsStatusResp
 @router.get("/operations/runs", response_model=OperationRunListResponse)
 async def list_operation_runs(
     storage: StorageDep,
+    auth: AuthDep,
     org_id: str = Query(...),
     run_type: Optional[str] = Query(None),
     success: Optional[bool] = Query(None),
@@ -1593,6 +1892,8 @@ async def list_operation_runs(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ) -> OperationRunListResponse:
+    _require_viewer(auth)
+    _enforce_org_scope(auth, org_id)
     from_time = _to_db_datetime(from_time)
     to_time = _to_db_datetime(to_time)
     offset = (page - 1) * page_size
@@ -1638,23 +1939,29 @@ async def list_operation_runs(
 async def get_operation_run(
     run_id: UUID,
     storage: StorageDep,
+    auth: AuthDep,
 ) -> OperationRunResponse:
+    _require_viewer(auth)
     async with storage.session_factory() as session:
         row = await session.get(ObservabilityOperationRun, run_id)
         if not row:
             raise HTTPException(status_code=404, detail="Operation run not found")
+        _enforce_org_scope(auth, row.org_id)
         return _operation_run_response(row)
 
 
 @router.get("/dashboard/fleet", response_model=FleetDashboardResponse)
 async def get_fleet_dashboard(
     storage: StorageDep,
+    auth: AuthDep,
     org_id: str = Query(...),
     deployment_id: Optional[UUID] = Query(None),
     from_time: datetime = Query(..., alias="from"),
     to_time: datetime = Query(..., alias="to"),
     granularity: str = Query("5m", pattern="^(1m|5m|1h)$"),
 ) -> FleetDashboardResponse:
+    _require_viewer(auth)
+    _enforce_org_scope(auth, org_id)
     from_time = _to_db_datetime(from_time)
     to_time = _to_db_datetime(to_time)
     if from_time is None or to_time is None:
@@ -1808,12 +2115,15 @@ async def get_fleet_dashboard(
 @router.get("/costs/summary", response_model=CostSummaryResponse)
 async def get_cost_summary(
     storage: StorageDep,
+    auth: AuthDep,
     org_id: str = Query(...),
     from_time: datetime = Query(..., alias="from"),
     to_time: datetime = Query(..., alias="to"),
     deployment_id: Optional[UUID] = Query(None),
     agent_id: Optional[str] = Query(None),
 ) -> CostSummaryResponse:
+    _require_viewer(auth)
+    _enforce_org_scope(auth, org_id)
     from_time = _to_db_datetime(from_time)
     to_time = _to_db_datetime(to_time)
     if from_time is None or to_time is None:
@@ -1936,12 +2246,15 @@ async def get_cost_summary(
 @router.get("/memory/consistency", response_model=MemoryConsistencyResponse)
 async def get_memory_consistency(
     storage: StorageDep,
+    auth: AuthDep,
     org_id: str = Query(...),
     from_time: datetime = Query(..., alias="from"),
     to_time: datetime = Query(..., alias="to"),
     deployment_id: Optional[UUID] = Query(None),
     session_id: Optional[UUID] = Query(None),
 ) -> MemoryConsistencyResponse:
+    _require_viewer(auth)
+    _enforce_org_scope(auth, org_id)
     from_time = _to_db_datetime(from_time)
     to_time = _to_db_datetime(to_time)
     if from_time is None or to_time is None:
@@ -2033,8 +2346,13 @@ async def get_memory_consistency(
 async def get_delegation_chain(
     trace_id: UUID,
     storage: StorageDep,
+    auth: AuthDep,
 ) -> DelegationChainResponse:
+    _require_viewer(auth)
     async with storage.session_factory() as session:
+        trace = await session.get(AITrace, trace_id)
+        if trace and trace.org_id:
+            _enforce_org_scope(auth, trace.org_id)
         edge_q = select(DelegationEdge).where(DelegationEdge.trace_id == trace_id).order_by(
             DelegationEdge.started_at.asc()
         )
@@ -2046,7 +2364,6 @@ async def get_delegation_chain(
             session_ids.add(edge.child_session_id)
 
         if not session_ids:
-            trace = await session.get(AITrace, trace_id)
             if trace and trace.session_id:
                 session_ids.add(trace.session_id)
 
@@ -2126,8 +2443,9 @@ async def get_delegation_chain(
 
 
 @router.get("/dashboard/ui", response_class=HTMLResponse)
-async def dashboard_ui() -> HTMLResponse:
+async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
     """Simple built-in dashboard for runtime observability inspection."""
+    _require_viewer(auth)
     html = """<!doctype html>
 <html lang="en">
 <head>

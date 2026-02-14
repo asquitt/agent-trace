@@ -3,10 +3,11 @@
 from functools import lru_cache
 from typing import Annotated
 
-from fastapi import Depends
+from fastapi import Depends, Request
 
 from .config import Settings, get_settings
 from .database import async_session_factory
+from .security import AuthContext, authenticate_request
 from .tracing import Tracer
 from .tracing.providers import TracedAnthropicClient, TracedOpenAIClient
 from .tracing.storage import PostgresStorageBackend
@@ -53,8 +54,17 @@ def get_openai_client() -> TracedOpenAIClient:
     )
 
 
+def get_auth_context(
+    request: Request,
+    settings: SettingsDep,
+) -> AuthContext:
+    """Authenticate incoming request and return auth context."""
+    return authenticate_request(request, settings)
+
+
 # Type aliases for common dependencies
 TracerDep = Annotated[Tracer, Depends(get_tracer)]
 AnthropicDep = Annotated[TracedAnthropicClient, Depends(get_anthropic_client)]
 OpenAIDep = Annotated[TracedOpenAIClient, Depends(get_openai_client)]
 StorageDep = Annotated[PostgresStorageBackend, Depends(get_storage_backend)]
+AuthDep = Annotated[AuthContext, Depends(get_auth_context)]

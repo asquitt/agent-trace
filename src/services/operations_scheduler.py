@@ -162,6 +162,10 @@ class ObservabilityOperationsScheduler:
                         session,
                         org_id,
                         execute_actions=self._settings.observability_scheduler_execute_policy_actions,
+                        require_shutdown_approval=self._settings.observability_shutdown_requires_approval,
+                        approval_max_age_minutes=(
+                            self._settings.observability_shutdown_approval_max_age_minutes
+                        ),
                     )
                 await session.commit()
 

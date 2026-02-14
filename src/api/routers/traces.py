@@ -4,11 +4,12 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Query, status
+from pydantic import BaseModel, ConfigDict, Field
 
-from ...dependencies import StorageDep
+from ...dependencies import AuthDep, StorageDep
 from ...models.trace import TraceStatus, TraceType
+from ...security import AuthContext, require_org_access, require_roles
 
 router = APIRouter(prefix="/api/v1/traces", tags=["traces"])
 
@@ -30,8 +31,7 @@ class ReasoningStepResponse(BaseModel):
     explanation: Optional[str] = None
     confidence: Optional[float] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SpanResponse(BaseModel):
@@ -56,8 +56,7 @@ class SpanResponse(BaseModel):
     # Reasoning steps
     reasoning_steps: list[ReasoningStepResponse] = Field(default_factory=list)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class TraceResponse(BaseModel):
@@ -80,8 +79,7 @@ class TraceResponse(BaseModel):
     metadata: dict = Field(default_factory=dict)
     spans: list[SpanResponse] = Field(default_factory=list)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class TraceListItem(BaseModel):
@@ -100,8 +98,7 @@ class TraceListItem(BaseModel):
     span_count: int = 0
     tags: list[str] = Field(default_factory=list)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class TraceListResponse(BaseModel):
@@ -129,9 +126,40 @@ class MetricsSummaryResponse(BaseModel):
 # Endpoints
 
 
+def _require_trace_viewer(auth: AuthContext) -> None:
+    require_roles(auth, "viewer", "operator", "admin")
+
+
+def _resolve_trace_org_scope(auth: AuthContext, org_id: Optional[str]) -> Optional[str]:
+    if auth.requested_org_id:
+        if org_id and org_id != auth.requested_org_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Request org mismatch. Header requested {auth.requested_org_id}, "
+                    f"endpoint requested {org_id}"
+                ),
+            )
+        org_id = auth.requested_org_id
+
+    if org_id:
+        require_org_access(auth, org_id)
+        return org_id
+
+    if auth.is_global_admin:
+        return None
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="org_id is required for non-global-admin access",
+    )
+
+
 @router.get("", response_model=TraceListResponse)
 async def list_traces(
     storage: StorageDep,
+    auth: AuthDep,
+    org_id: Optional[str] = Query(None, description="Tenant org ID"),
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(50, ge=1, le=100, description="Items per page"),
     trace_type: Optional[TraceType] = Query(None, description="Filter by trace type"),
@@ -144,9 +172,12 @@ async def list_traces(
     Use this endpoint to browse traces, filter by type/status, or find
     all traces related to a specific idea.
     """
+    _require_trace_viewer(auth)
+    resolved_org_id = _resolve_trace_org_scope(auth, org_id)
     offset = (page - 1) * page_size
 
     traces = await storage.list_traces(
+        org_id=resolved_org_id,
         trace_type=trace_type.value if trace_type else None,
         status=status.value if status else None,
         idea_id=idea_id,
@@ -161,6 +192,7 @@ async def list_traces(
 
     # Get total count
     total = await storage.get_trace_count(
+        org_id=resolved_org_id,
         trace_type=trace_type.value if trace_type else None,
         status=status.value if status else None,
     )
@@ -196,6 +228,7 @@ async def list_traces(
 async def get_trace(
     trace_id: UUID,
     storage: StorageDep,
+    auth: AuthDep,
     include_prompts: bool = Query(False, description="Include full prompts/responses"),
 ) -> TraceResponse:
     """Get a single trace with all spans.
@@ -203,9 +236,17 @@ async def get_trace(
     Set include_prompts=True to see full prompt and response text.
     This is useful for debugging but may return large responses.
     """
+    _require_trace_viewer(auth)
     trace = await storage.get_trace(trace_id)
     if not trace:
         raise HTTPException(status_code=404, detail="Trace not found")
+    if trace.org_id:
+        require_org_access(auth, trace.org_id)
+    elif not auth.is_global_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Trace has no org scope and requires global admin access",
+        )
 
     spans = []
     for span in trace.spans or []:
@@ -270,15 +311,24 @@ async def get_trace(
 async def get_trace_reasoning(
     trace_id: UUID,
     storage: StorageDep,
+    auth: AuthDep,
 ) -> list[ReasoningStepResponse]:
     """Get all reasoning steps for a trace.
 
     Returns a flat list of all reasoning steps across all spans,
     useful for understanding the decision chain.
     """
+    _require_trace_viewer(auth)
     trace = await storage.get_trace(trace_id)
     if not trace:
         raise HTTPException(status_code=404, detail="Trace not found")
+    if trace.org_id:
+        require_org_access(auth, trace.org_id)
+    elif not auth.is_global_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Trace has no org scope and requires global admin access",
+        )
 
     reasoning_steps = []
     for span in trace.spans or []:
@@ -305,13 +355,17 @@ async def get_trace_reasoning(
 async def get_idea_trace_history(
     idea_id: int,
     storage: StorageDep,
+    auth: AuthDep,
+    org_id: Optional[str] = Query(None, description="Tenant org ID"),
 ) -> list[TraceListItem]:
     """Get all traces for a specific idea.
 
     Shows the complete history of AI operations on this idea,
     useful for auditing and understanding how rankings evolved.
     """
-    traces = await storage.get_traces_for_idea(idea_id)
+    _require_trace_viewer(auth)
+    resolved_org_id = _resolve_trace_org_scope(auth, org_id)
+    traces = await storage.get_traces_for_idea(idea_id, org_id=resolved_org_id)
 
     return [
         TraceListItem(
@@ -336,15 +390,24 @@ async def get_idea_trace_history(
 async def export_trace_json(
     trace_id: UUID,
     storage: StorageDep,
+    auth: AuthDep,
     include_prompts: bool = Query(True, description="Include full prompts/responses"),
 ) -> dict:
     """Export a trace as JSON for external analysis.
 
     Returns the complete trace data including all spans and reasoning steps.
     """
+    _require_trace_viewer(auth)
     trace = await storage.get_trace(trace_id)
     if not trace:
         raise HTTPException(status_code=404, detail="Trace not found")
+    if trace.org_id:
+        require_org_access(auth, trace.org_id)
+    elif not auth.is_global_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Trace has no org scope and requires global admin access",
+        )
 
     # Build complete export
     export_data = {

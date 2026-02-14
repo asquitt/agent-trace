@@ -240,6 +240,7 @@ class PostgresStorageBackend:
     async def list_traces(
         self,
         *,
+        org_id: Optional[str] = None,
         trace_type: Optional[str] = None,
         status: Optional[str] = None,
         idea_id: Optional[int] = None,
@@ -263,6 +264,8 @@ class PostgresStorageBackend:
         async with self.session_factory() as session:
             query = select(AITrace).order_by(AITrace.started_at.desc())
 
+            if org_id:
+                query = query.where(AITrace.org_id == org_id)
             if trace_type:
                 query = query.where(AITrace.trace_type == trace_type)
             if status:
@@ -277,7 +280,12 @@ class PostgresStorageBackend:
             result = await session.execute(query)
             return list(result.scalars().all())
 
-    async def get_traces_for_idea(self, idea_id: int) -> list[AITrace]:
+    async def get_traces_for_idea(
+        self,
+        idea_id: int,
+        *,
+        org_id: Optional[str] = None,
+    ) -> list[AITrace]:
         """Get all traces for a specific idea.
 
         Args:
@@ -286,11 +294,12 @@ class PostgresStorageBackend:
         Returns:
             List of traces for the idea
         """
-        return await self.list_traces(idea_id=idea_id, limit=100)
+        return await self.list_traces(org_id=org_id, idea_id=idea_id, limit=100)
 
     async def get_trace_count(
         self,
         *,
+        org_id: Optional[str] = None,
         trace_type: Optional[str] = None,
         status: Optional[str] = None,
     ) -> int:
@@ -308,6 +317,8 @@ class PostgresStorageBackend:
 
             query = select(func.count(AITrace.id))
 
+            if org_id:
+                query = query.where(AITrace.org_id == org_id)
             if trace_type:
                 query = query.where(AITrace.trace_type == trace_type)
             if status:

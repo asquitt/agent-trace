@@ -86,6 +86,15 @@ class PolicyStatus(str, Enum):
     PAUSED = "paused"
 
 
+class PolicyApprovalStatus(str, Enum):
+    """Policy action approval workflow state."""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
 class AnomalyType(str, Enum):
     """Supported anomaly classes."""
 
@@ -476,6 +485,11 @@ class BudgetPolicy(Base):
         back_populates="policy",
         cascade="all, delete-orphan",
     )
+    approvals: Mapped[list["PolicyActionApproval"]] = relationship(
+        "PolicyActionApproval",
+        back_populates="policy",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         Index("ix_budget_policies_org_status", "org_id", "status"),
@@ -601,6 +615,50 @@ class BudgetPolicyEvent(Base):
 
     __table_args__ = (
         Index("ix_budget_policy_events_policy_triggered", "policy_id", "triggered_at"),
+    )
+
+
+class PolicyActionApproval(Base):
+    """Approval record for sensitive policy actions."""
+
+    __tablename__ = "policy_action_approvals"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    org_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    policy_id: Mapped[UUID] = mapped_column(
+        ForeignKey("budget_policies.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    action_type: Mapped[PolicyActionType] = mapped_column(
+        PG_ENUM(
+            "alert", "throttle", "require_approval", "shutdown",
+            name="policy_action_type", create_type=False
+        ),
+        nullable=False,
+    )
+    status: Mapped[PolicyApprovalStatus] = mapped_column(
+        PG_ENUM(
+            "pending", "approved", "rejected", "expired",
+            name="policy_approval_status", create_type=False
+        ),
+        nullable=False,
+        default=PolicyApprovalStatus.PENDING,
+    )
+    requested_by: Mapped[Optional[str]] = mapped_column(String(255))
+    requested_at: Mapped[datetime] = mapped_column(nullable=False, index=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(index=True)
+    decided_by: Mapped[Optional[str]] = mapped_column(String(255))
+    decided_at: Mapped[Optional[datetime]] = mapped_column()
+    decision_reason: Mapped[Optional[str]] = mapped_column(Text)
+    approval_metadata: Mapped[Optional[dict]] = mapped_column("metadata", JSONB, default=dict)
+
+    policy: Mapped["BudgetPolicy"] = relationship("BudgetPolicy", back_populates="approvals")
+
+    __table_args__ = (
+        Index("ix_policy_action_approvals_policy_status", "policy_id", "status"),
+        Index("ix_policy_action_approvals_org_status", "org_id", "status"),
+        Index("ix_policy_action_approvals_expires_at", "expires_at"),
     )
 
 

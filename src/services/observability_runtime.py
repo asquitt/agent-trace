@@ -28,6 +28,8 @@ from ..models.observability import (
     MemoryConsistencyState,
     MemorySnapshot,
     PolicyActionType,
+    PolicyActionApproval,
+    PolicyApprovalStatus,
     PolicyStatus,
     SessionStatus,
 )
@@ -178,6 +180,8 @@ async def _apply_policy_action(
     now: datetime,
     breaches: list[dict[str, Any]],
     execute_actions: bool,
+    require_shutdown_approval: bool,
+    approval_max_age_minutes: int,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "policy_id": str(policy.id),
@@ -187,6 +191,8 @@ async def _apply_policy_action(
         "affected_sessions": 0,
         "affected_session_ids": [],
         "skipped_session_ids": [],
+        "approval_required": False,
+        "approval_id": None,
     }
     if not execute_actions:
         result["status"] = "dry_run"
@@ -197,6 +203,31 @@ async def _apply_policy_action(
     skipped_ids: list[str] = []
 
     policy_action = _enum_value(policy.action_on_breach)
+    if policy_action == PolicyActionType.SHUTDOWN.value and require_shutdown_approval:
+        approval_cutoff = now - timedelta(minutes=max(approval_max_age_minutes, 1))
+        approval_query = (
+            select(PolicyActionApproval)
+            .where(
+                PolicyActionApproval.org_id == org_id,
+                PolicyActionApproval.policy_id == policy.id,
+                PolicyActionApproval.action_type == PolicyActionType.SHUTDOWN.value,
+                PolicyActionApproval.status == PolicyApprovalStatus.APPROVED.value,
+                PolicyActionApproval.requested_at >= approval_cutoff,
+                or_(
+                    PolicyActionApproval.expires_at.is_(None),
+                    PolicyActionApproval.expires_at >= now,
+                ),
+            )
+            .order_by(desc(PolicyActionApproval.requested_at))
+            .limit(1)
+        )
+        approval = (await db.execute(approval_query)).scalar_one_or_none()
+        if approval is None:
+            result["status"] = "approval_required"
+            result["approval_required"] = True
+            return result
+        result["approval_id"] = str(approval.id)
+
     policy_priority = _action_priority(policy_action)
     for session_row in sessions:
         existing_control = dict((session_row.session_metadata or {}).get("control", {}))
@@ -283,6 +314,8 @@ async def evaluate_budget_policies(
     *,
     as_of: Optional[datetime] = None,
     execute_actions: bool = True,
+    require_shutdown_approval: bool = False,
+    approval_max_age_minutes: int = 60,
 ) -> dict[str, Any]:
     """Evaluate budget policies and execute configured controls."""
     now = ensure_naive_utc(as_of) or utcnow_naive()
@@ -432,6 +465,8 @@ async def evaluate_budget_policies(
             now,
             breaches,
             execute_actions,
+            require_shutdown_approval,
+            approval_max_age_minutes,
         )
         policy_result["action_result"] = action_result
         if action_result["status"] in {"executed", "alert_only"}:

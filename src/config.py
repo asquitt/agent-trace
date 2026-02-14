@@ -84,10 +84,30 @@ class Settings(BaseSettings):
     weight_personal_fit: float = Field(default=0.05)
 
     # Server
+    service_name: str = Field(default="ai-trace")
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8000)
     debug: bool = Field(default=False)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(default="INFO")
+
+    # API auth and tenancy controls
+    api_auth_enabled: bool = Field(
+        default=False,
+        description="Enable API key authentication",
+    )
+    api_key_header: str = Field(default="X-API-Key")
+    api_tenant_header: str = Field(default="X-Org-Id")
+    api_require_tenant_header: bool = Field(
+        default=False,
+        description="Require tenant org header for authenticated requests",
+    )
+    api_keys: list[str] = Field(
+        default_factory=list,
+        description=(
+            "API key entries as token:subject:role1|role2:org1|org2 "
+            "(org '*' grants global access)"
+        ),
+    )
 
     # CORS (for dashboard)
     cors_origins: list[str] = Field(
@@ -124,6 +144,13 @@ class Settings(BaseSettings):
     observability_notification_max_attempts: int = Field(default=3, ge=1, le=10)
     observability_notification_retry_backoff_seconds: float = Field(default=0.5, ge=0.0, le=10.0)
 
+    # Runtime policy safety controls
+    observability_shutdown_requires_approval: bool = Field(
+        default=True,
+        description="Require approval records before shutdown actions execute",
+    )
+    observability_shutdown_approval_max_age_minutes: int = Field(default=60, ge=1, le=10080)
+
     @field_validator("observability_scheduler_org_ids", mode="before")
     @classmethod
     def _parse_org_ids(cls, value: Any) -> Any:
@@ -134,6 +161,13 @@ class Settings(BaseSettings):
     @field_validator("observability_notification_webhooks", mode="before")
     @classmethod
     def _parse_webhooks(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("api_keys", mode="before")
+    @classmethod
+    def _parse_api_keys(cls, value: Any) -> Any:
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value

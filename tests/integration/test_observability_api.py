@@ -86,6 +86,38 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
         },
     )
     assert policy_resp.status_code == 201
+    policy_id = policy_resp.json()["id"]
+
+    approval_resp = client.post(
+        "/api/v1/observability/policy-approvals",
+        json={
+            "org_id": org_id,
+            "policy_id": policy_id,
+            "requested_by": "integration-test",
+            "reason": "Allow emergency shutdown action for smoke validation",
+        },
+    )
+    assert approval_resp.status_code == 201
+    approval_id = approval_resp.json()["id"]
+    assert approval_resp.json()["status"] == "pending"
+
+    approval_decision_resp = client.post(
+        f"/api/v1/observability/policy-approvals/{approval_id}/decision",
+        json={
+            "decision": "approved",
+            "decided_by": "integration-admin",
+            "reason": "Approved for smoke run",
+        },
+    )
+    assert approval_decision_resp.status_code == 200
+    assert approval_decision_resp.json()["status"] == "approved"
+
+    approvals_list_resp = client.get(
+        "/api/v1/observability/policy-approvals",
+        params={"org_id": org_id},
+    )
+    assert approvals_list_resp.status_code == 200
+    assert approvals_list_resp.json()["total"] >= 1
 
     delegation_resp = client.post(
         "/api/v1/observability/delegations",
