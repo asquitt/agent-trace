@@ -355,7 +355,7 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
         json={
             "org_id": org_id,
             "auto_evaluate_policies": False,
-            "notify": False,
+            "notify": True,
             "anomaly_dedupe_window_minutes": 60,
             "anomaly_reopen_acknowledged": True,
         },
@@ -363,6 +363,8 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     assert detector_rerun_resp.status_code == 200
     assert detector_rerun_resp.json()["detector_run"]["created_anomalies"] == 0
     assert detector_rerun_resp.json()["detector_run"]["deduplicated_anomalies"] >= 1
+    assert detector_rerun_resp.json()["notification_result"]["skipped"] is True
+    assert detector_rerun_resp.json()["notification_result"]["skip_reason"] == "no_actionable_findings"
 
     ops_resp = client.post(
         "/api/v1/observability/operations/run",

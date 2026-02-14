@@ -66,6 +66,7 @@
     - integration coverage extended for policy simulation side-effect guarantees and SIEM export target validation
     - detector anomaly dedup/suppression shipped with repeated-trigger aggregation metadata and optional ACK->OPEN auto-reopen controls
     - detector/runtime config extended with `anomaly_dedupe_window_minutes` + `anomaly_reopen_acknowledged` across API, scheduler, and env settings
+    - actionable-only notification gating shipped (`OBSERVABILITY_NOTIFICATION_ONLY_ON_ACTIONABLE`) to suppress empty detector/policy runs
     - integration coverage extended for repeated detector runs (`created_anomalies` then `deduplicated_anomalies`) on delegation-loop anomalies
     - full e2e runner re-validated after changes (`39 passed`, migration replay pass, second test pass)
 

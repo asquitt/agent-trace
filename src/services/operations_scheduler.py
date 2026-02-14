@@ -195,28 +195,52 @@ class ObservabilityOperationsScheduler:
                 await session.commit()
 
             if self._settings.observability_scheduler_enable_notifications:
-                targets = list(self._settings.observability_notification_webhooks)
-                targets.extend(collect_policy_notification_target_strings(policy_summary))
-                notification_payload = {
-                    "event_type": "observability_scheduler_run",
-                    "org_id": org_id,
-                    "run_started_at": run_started,
-                    "detector_summary": detector_summary,
-                    "policy_summary": policy_summary,
-                }
-                notification_result = await send_runtime_notifications(
-                    targets,
-                    notification_payload,
-                    slack_webhooks=normalize_slack_webhook_targets(
-                        self._settings.observability_notification_slack_webhooks
-                    ),
-                    pagerduty_routing_keys=normalize_pagerduty_routing_keys(
-                        self._settings.observability_notification_pagerduty_routing_keys
-                    ),
-                    timeout_seconds=self._settings.observability_notification_timeout_seconds,
-                    max_attempts=self._settings.observability_notification_max_attempts,
-                    retry_backoff_seconds=self._settings.observability_notification_retry_backoff_seconds,
-                )
+                created_anomalies = int(detector_summary.get("created_anomalies", 0) or 0)
+                breached_policies = int(policy_summary.get("breached_policies", 0) or 0)
+                if (
+                    self._settings.observability_notification_only_on_actionable
+                    and created_anomalies == 0
+                    and breached_policies == 0
+                ):
+                    notification_result = {
+                        "attempted": 0,
+                        "succeeded": 0,
+                        "failed": 0,
+                        "errors": [],
+                        "max_attempts": max(self._settings.observability_notification_max_attempts, 1),
+                        "channels": {
+                            "webhook": {"attempted": 0, "succeeded": 0, "failed": 0},
+                            "slack": {"attempted": 0, "succeeded": 0, "failed": 0},
+                            "pagerduty": {"attempted": 0, "succeeded": 0, "failed": 0},
+                        },
+                        "skipped": True,
+                        "skip_reason": "no_actionable_findings",
+                    }
+                else:
+                    targets = list(self._settings.observability_notification_webhooks)
+                    targets.extend(collect_policy_notification_target_strings(policy_summary))
+                    notification_payload = {
+                        "event_type": "observability_scheduler_run",
+                        "org_id": org_id,
+                        "run_started_at": run_started,
+                        "detector_summary": detector_summary,
+                        "policy_summary": policy_summary,
+                    }
+                    notification_result = await send_runtime_notifications(
+                        targets,
+                        notification_payload,
+                        slack_webhooks=normalize_slack_webhook_targets(
+                            self._settings.observability_notification_slack_webhooks
+                        ),
+                        pagerduty_routing_keys=normalize_pagerduty_routing_keys(
+                            self._settings.observability_notification_pagerduty_routing_keys
+                        ),
+                        timeout_seconds=self._settings.observability_notification_timeout_seconds,
+                        max_attempts=self._settings.observability_notification_max_attempts,
+                        retry_backoff_seconds=(
+                            self._settings.observability_notification_retry_backoff_seconds
+                        ),
+                    )
             await self._finish_run_row(
                 run_id,
                 org_id=org_id,

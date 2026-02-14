@@ -148,6 +148,7 @@ class Settings(BaseSettings):
     observability_notification_webhooks: list[str] = Field(default_factory=list)
     observability_notification_slack_webhooks: list[str] = Field(default_factory=list)
     observability_notification_pagerduty_routing_keys: list[str] = Field(default_factory=list)
+    observability_notification_only_on_actionable: bool = Field(default=True)
     observability_notification_timeout_seconds: float = Field(default=5.0, ge=0.1, le=30.0)
     observability_notification_max_attempts: int = Field(default=3, ge=1, le=10)
     observability_notification_retry_backoff_seconds: float = Field(default=0.5, ge=0.0, le=10.0)

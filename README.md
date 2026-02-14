@@ -16,6 +16,7 @@ AI Trace extends classic LLM tracing into a control plane:
 - Budget policy evaluation with runtime actions (`alert`, `throttle`, `require_approval`, `shutdown`)
 - Operations scheduler with persistent run/audit logs
 - SIEM export and operational notifications (webhook, Slack, PagerDuty)
+- Actionable-only notification gating to suppress no-op detector runs
 
 ## Release Status
 
@@ -166,6 +167,7 @@ Configure via `.env` (see `.env.example`).
 - `OBSERVABILITY_NOTIFICATION_WEBHOOKS`
 - `OBSERVABILITY_NOTIFICATION_SLACK_WEBHOOKS`
 - `OBSERVABILITY_NOTIFICATION_PAGERDUTY_ROUTING_KEYS`
+- `OBSERVABILITY_NOTIFICATION_ONLY_ON_ACTIONABLE`
 - `OBSERVABILITY_NOTIFICATION_TIMEOUT_SECONDS`
 - `OBSERVABILITY_NOTIFICATION_MAX_ATTEMPTS`
 - `OBSERVABILITY_NOTIFICATION_RETRY_BACKOFF_SECONDS`

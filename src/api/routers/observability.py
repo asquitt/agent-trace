@@ -174,6 +174,28 @@ async def _dispatch_runtime_notifications(
     policy_summary: Optional[dict[str, Any]] = None,
     extra_targets: Optional[list[str]] = None,
 ) -> dict[str, Any]:
+    created_anomalies = int((detector_summary or {}).get("created_anomalies", 0) or 0)
+    breached_policies = int((policy_summary or {}).get("breached_policies", 0) or 0)
+    if (
+        settings.observability_notification_only_on_actionable
+        and created_anomalies == 0
+        and breached_policies == 0
+    ):
+        return {
+            "attempted": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "errors": [],
+            "max_attempts": max(settings.observability_notification_max_attempts, 1),
+            "channels": {
+                "webhook": {"attempted": 0, "succeeded": 0, "failed": 0},
+                "slack": {"attempted": 0, "succeeded": 0, "failed": 0},
+                "pagerduty": {"attempted": 0, "succeeded": 0, "failed": 0},
+            },
+            "skipped": True,
+            "skip_reason": "no_actionable_findings",
+        }
+
     raw_targets = list(settings.observability_notification_webhooks)
     raw_targets.extend(collect_policy_notification_target_strings(policy_summary or {}))
     raw_targets.extend(extra_targets or [])
