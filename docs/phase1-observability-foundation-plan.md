@@ -37,6 +37,10 @@
     - list-traces detached-instance bug fixed via eager span loading
     - list-traces `total` now honors `idea_id` and `correlation_id` filters
     - `Idea` model enum mapping aligned with migration enum types (`source_type`, `idea_status`)
+  - Release-path hardening shipped:
+    - CI Postgres service image aligned to `pgvector/pgvector:pg16`
+    - CI now verifies migration replay (`downgrade 001 -> upgrade head`)
+    - repeatable local e2e runner added: `scripts/run_full_e2e.sh`
 
 ## Phase 2 Runtime Control Addendum (Completed)
 

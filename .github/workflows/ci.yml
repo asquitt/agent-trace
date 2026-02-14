@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -49,6 +49,11 @@ jobs:
 
       - name: Migrations
         run: alembic upgrade head
+
+      - name: Migration Replay
+        run: |
+          alembic downgrade 001
+          alembic upgrade head
 
       - name: Test
         run: pytest -q -p pytest_cov -p pytest_asyncio

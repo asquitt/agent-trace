@@ -212,9 +212,17 @@ pyright
 pytest -q -p pytest_cov -p pytest_asyncio
 ```
 
+Full fresh-db e2e validation:
+
+```bash
+./scripts/run_full_e2e.sh
+```
+
 GitHub Actions CI is included in:
 
 - `.github/workflows/ci.yml`
+  - Uses `pgvector/pgvector:pg16` service image (required for migration `001` extension setup)
+  - Runs migration replay (`downgrade 001 -> upgrade head`) before tests
 
 ## Recent Hardening (February 14, 2026)
 
