@@ -112,6 +112,7 @@ class Settings(BaseSettings):
     api_rate_limit_requests_per_window: int = Field(default=240, ge=1, le=100000)
     api_rate_limit_window_seconds: int = Field(default=60, ge=1, le=3600)
     api_rate_limit_per_path: bool = Field(default=False)
+    api_rate_limit_max_keys: int = Field(default=10000, ge=100, le=1000000)
 
     # CORS (for dashboard)
     cors_origins: list[str] = Field(

@@ -49,3 +49,18 @@ def test_rate_limiter_snapshot_prunes_stale_keys() -> None:
 
     snapshot = limiter.snapshot(now_epoch=20.5)
     assert snapshot["active_keys"] == 0
+
+
+def test_rate_limiter_evicts_oldest_key_at_capacity() -> None:
+    limiter = InMemoryRateLimiter(limit=1, window_seconds=60, cleanup_interval_seconds=100, max_keys=2)
+    limiter.allow("caller-a", now_epoch=1.0)
+    limiter.allow("caller-b", now_epoch=2.0)
+    limiter.allow("caller-c", now_epoch=3.0)
+
+    # caller-a should have been evicted, so this is allowed instead of blocked.
+    decision = limiter.allow("caller-a", now_epoch=3.1)
+    snapshot = limiter.snapshot(now_epoch=3.1)
+
+    assert decision.allowed
+    assert snapshot["active_keys"] == 2
+    assert snapshot["evicted_keys"] >= 1

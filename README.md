@@ -28,8 +28,8 @@ AI Trace extends classic LLM tracing into a control plane:
 - Validation evidence:
   - `ruff check --select F src tests` passed
   - `pyright` passed (`0 errors`)
-  - `pytest -q` passed (`44 passed, 2 skipped`) in lightweight local run
-  - `./scripts/run_full_e2e.sh` passed (`46 passed`, fresh DB, migration replay, double test pass)
+  - `pytest -q` passed (`45 passed, 2 skipped`) in lightweight local run
+  - `./scripts/run_full_e2e.sh` passed (`47 passed`, fresh DB, migration replay, double test pass)
 
 ## Architecture
 
@@ -157,6 +157,7 @@ Configure via `.env` (see `.env.example`).
 - `API_RATE_LIMIT_REQUESTS_PER_WINDOW`
 - `API_RATE_LIMIT_WINDOW_SECONDS`
 - `API_RATE_LIMIT_PER_PATH`
+- `API_RATE_LIMIT_MAX_KEYS`
 
 ### Scheduler and Runtime Control
 

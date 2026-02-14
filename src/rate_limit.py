@@ -28,13 +28,17 @@ class InMemoryRateLimiter:
         window_seconds: int,
         *,
         cleanup_interval_seconds: int | None = None,
+        max_keys: int = 10000,
     ) -> None:
         self._limit = max(limit, 1)
         self._window_seconds = max(window_seconds, 1)
         cleanup_default = min(self._window_seconds, 60)
         self._cleanup_interval_seconds = max(cleanup_interval_seconds or cleanup_default, 1)
+        self._max_keys = max(max_keys, 1)
         self._next_cleanup_epoch = 0.0
         self._buckets: dict[str, deque[float]] = {}
+        self._last_seen_epoch: dict[str, float] = {}
+        self._evicted_keys = 0
         self._lock = Lock()
 
     def _prune_stale_locked(self, now: float) -> None:
@@ -47,6 +51,15 @@ class InMemoryRateLimiter:
                 stale_keys.append(bucket_key)
         for bucket_key in stale_keys:
             self._buckets.pop(bucket_key, None)
+            self._last_seen_epoch.pop(bucket_key, None)
+
+    def _evict_oldest_locked(self) -> None:
+        if not self._last_seen_epoch:
+            return
+        oldest_key = min(self._last_seen_epoch.items(), key=lambda item: item[1])[0]
+        self._buckets.pop(oldest_key, None)
+        self._last_seen_epoch.pop(oldest_key, None)
+        self._evicted_keys += 1
 
     def allow(self, key: str, now_epoch: float | None = None) -> RateLimitDecision:
         """Evaluate whether a request should be allowed."""
@@ -59,8 +72,11 @@ class InMemoryRateLimiter:
 
             bucket = self._buckets.get(key)
             if bucket is None:
+                if len(self._buckets) >= self._max_keys:
+                    self._evict_oldest_locked()
                 bucket = deque()
                 self._buckets[key] = bucket
+            self._last_seen_epoch[key] = now
 
             if len(bucket) >= self._limit:
                 reset_at = bucket[0] + self._window_seconds
@@ -93,4 +109,6 @@ class InMemoryRateLimiter:
                 "active_keys": len(self._buckets),
                 "window_seconds": self._window_seconds,
                 "limit": self._limit,
+                "max_keys": self._max_keys,
+                "evicted_keys": self._evicted_keys,
             }

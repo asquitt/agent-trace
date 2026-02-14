@@ -42,6 +42,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         InMemoryRateLimiter(
             limit=settings.api_rate_limit_requests_per_window,
             window_seconds=settings.api_rate_limit_window_seconds,
+            max_keys=settings.api_rate_limit_max_keys,
         )
         if settings.api_rate_limit_enabled
         else None
