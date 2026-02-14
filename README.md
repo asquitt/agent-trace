@@ -8,10 +8,12 @@ AI Trace provides end-to-end traceability for autonomous agent systems and adds 
 
 - Trace, span, and reasoning-chain capture
 - Fleet and session observability across deployments
+- Active-session activity feed (latest action type/name/resource + elapsed runtime)
 - Runtime anomaly detection (API spikes, cost spikes, unusual resource access, memory divergence, delegation loops)
 - Budget policy engine with runtime controls (`alert`, `throttle`, `require_approval`, `shutdown`)
 - Multi-agent delegation chain tracing
 - Continuous control loops (scheduler), notifications, and run audit logs
+- Risk drift insights + scheduler health telemetry surfaced via APIs and dashboard
 - Tenant-scoped API auth, RBAC, and shutdown approval workflow
 - Persistent system audit events and SIEM export endpoint
 - Request rate limiting with configurable windows
@@ -20,7 +22,7 @@ AI Trace provides end-to-end traceability for autonomous agent systems and adds 
 
 **Current version:** `0.2.0`  
 **Maturity:** Beta  
-**Validation snapshot (February 14, 2026):** `33 passed` (full unit + integration on fresh migrated Postgres)
+**Validation snapshot (February 14, 2026):** `34 passed` (full unit + integration on fresh migrated Postgres)
 
 ## Core Capabilities
 
@@ -29,6 +31,7 @@ AI Trace provides end-to-end traceability for autonomous agent systems and adds 
 - Deployments, sessions, actions, delegations, memory snapshots
 - Fleet metrics, top agents/resources, cost/token summaries
 - Active session inventory and session lifecycle tracking
+- Latest observed action context per active session for operator triage
 
 ### 2) Detection + Governance
 
@@ -51,6 +54,7 @@ AI Trace provides end-to-end traceability for autonomous agent systems and adds 
 - Background scheduler for periodic detectors/policies
 - Outbound webhook notifications with retry/backoff
 - Persistent operation-run logs for manual and scheduled loops
+- Scheduler health state (`healthy`/`degraded`/`stopped`/`disabled`) in operations + metrics APIs
 - Immutable-style system audit event log for control-plane activity
 
 ### 5) Security and Isolation
@@ -119,6 +123,7 @@ src/
 - Dashboards/Analytics:
   - `GET /api/v1/observability/dashboard/fleet`
   - `GET /api/v1/observability/costs/summary`
+  - `GET /api/v1/observability/insights/risk`
   - `GET /api/v1/observability/memory/consistency`
   - `GET /api/v1/observability/chains/{trace_id}`
   - `GET /api/v1/observability/dashboard/ui`
@@ -201,6 +206,7 @@ Use `.env` (see `.env.example`).
 6. Configure alerting on:
    - `/health/ready != 200`
    - operation-run failures
+   - scheduler health status != `healthy`
    - notification delivery failures
 7. Rotate API keys and store secrets in a vault/KMS.
 
@@ -210,6 +216,7 @@ Use `.env` (see `.env.example`).
 ruff check --select F src tests
 pyright
 pytest -q -p pytest_cov -p pytest_asyncio
+docker build -f docker/Dockerfile .
 ```
 
 Full fresh-db e2e validation:
@@ -223,12 +230,25 @@ GitHub Actions CI is included in:
 - `.github/workflows/ci.yml`
   - Uses `pgvector/pgvector:pg16` service image (required for migration `001` extension setup)
   - Runs migration replay (`downgrade 001 -> upgrade head`) before tests
+  - Runs Docker build smoke validation for release artifact integrity
 
 ## Recent Hardening (February 14, 2026)
 
 - Consolidated duplicate timestamp normalization logic into shared helpers (`src/utils/time.py`) and wired API/service/storage paths to it.
 - Removed duplicate UTC conversion implementations across routers, runtime service, scheduler, and storage backend to prevent drift.
 - Stabilized strict type-checking in CI with high-signal diagnostics and fixed concrete type/runtime defects in active API/runtime paths.
+- Added same-request idempotency protection in action batch ingestion (`client_event_id` duplicate rejection now covers in-request duplicates and historical duplicates).
+- Hardened scheduler reliability: one org failure no longer blocks other org runs in the same tick; failures are now tracked in scheduler status (`last_tick_failures`).
+- Enriched scheduler observability with computed health state and org failure counts in both `/api/v1/observability/operations/status` and `/metrics`.
+- Added proactive runtime risk endpoint (`GET /api/v1/observability/insights/risk`) with current-vs-previous window deltas and signal generation.
+- Extended cost summary with burn-rate forecasting (`cost_per_hour_usd`, `projected_daily_cost_usd`, per-policy `projected_exhaustion_at`).
+- Added active-session latest-action enrichment (`latest_action_type`, `latest_action_name`, `latest_action_resource`) for runtime session triage.
+- Wired dashboard UI to new runtime intelligence feeds: active session feed + risk signal panel.
+- Hardened container runtime path:
+  - non-root API image user
+  - startup entrypoint with optional migration gate (`MIGRATE_ON_START`)
+  - container healthcheck moved to `/health/live`
+  - reduced build context via `.dockerignore`
 - Added unit coverage for shared time helpers and scheduler lifecycle:
   - `tests/unit/test_time_utils.py`
   - `tests/unit/test_operations_scheduler.py`

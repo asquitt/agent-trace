@@ -28,7 +28,7 @@
 - Validation completed:
   - Migration replay in isolated virtualenv: `upgrade head -> downgrade 001 -> upgrade head` succeeded
   - Endpoint smoke checks succeeded for deployment/session/action/delegation/anomaly/dashboard/cost/memory/anomaly-list/chains paths
-  - Automated tests pass: `33 passed` (`tests/integration/test_observability_api.py`, `tests/integration/test_traces_api.py`, `tests/unit/test_tracing.py`, `tests/unit/test_tracing_decorators.py`, `tests/unit/test_observability_runtime.py`, `tests/unit/test_notifications.py`, `tests/unit/test_security.py`, `tests/unit/test_rate_limit.py`, `tests/unit/test_time_utils.py`, `tests/unit/test_operations_scheduler.py`)
+  - Automated tests pass: `34 passed` (`tests/integration/test_observability_api.py`, `tests/integration/test_traces_api.py`, `tests/unit/test_tracing.py`, `tests/unit/test_tracing_decorators.py`, `tests/unit/test_observability_runtime.py`, `tests/unit/test_notifications.py`, `tests/unit/test_security.py`, `tests/unit/test_rate_limit.py`, `tests/unit/test_time_utils.py`, `tests/unit/test_operations_scheduler.py`)
   - Trace API/storage cleanup shipped:
     - `GET /api/v1/traces/metrics/summary` implemented with storage-backed aggregates
     - trace/span timestamp normalization to naive UTC in storage layer
@@ -43,6 +43,20 @@
     - repeatable local e2e runner added: `scripts/run_full_e2e.sh`
     - shared UTC normalization utility added and wired across API/service/storage (`src/utils/time.py`)
     - strict pyright CI gate now green (`0 errors`) with high-signal diagnostics
+    - same-request action-ingest idempotency guard added for duplicate `client_event_id` handling
+    - scheduler org-fault isolation added (`last_tick_failures`) so one org failure no longer blocks other org runs
+    - risk insights endpoint added (`GET /api/v1/observability/insights/risk`) for current-vs-previous window drift signals
+    - cost burn-rate projection added in summary APIs (`projected_daily_cost_usd`, per-policy `projected_exhaustion_at`)
+    - active-session endpoint enrichment added (`latest_action_type`, `latest_action_name`, `latest_action_resource`)
+    - dashboard UI integrated with active-session feed and risk signal panel
+    - operations status + `/metrics` now publish computed scheduler health (`healthy`/`degraded`/`stopped`/`disabled`)
+    - duplicate UTC wrapper cleanup completed in API/runtime service paths
+    - container hardening shipped:
+      - non-root Docker runtime user
+      - startup entrypoint with optional migration gate (`MIGRATE_ON_START`)
+      - `.dockerignore` for leaner release artifacts
+      - API healthcheck aligned to `/health/live`
+    - CI now includes Docker build smoke validation
 
 ## Phase 2 Runtime Control Addendum (Completed)
 
@@ -85,7 +99,7 @@
 
 ### Validation evidence
 
-- Full test suite: `33 passed`
+- Full test suite: `34 passed`
 - Live Postgres integration run: `tests/integration/test_observability_api.py` passed against isolated temporary Postgres with fresh `alembic upgrade head`
 - Verified:
   - budget breach evaluation
@@ -117,14 +131,21 @@
   - configurable in-memory request rate limiting with response headers
   - system audit events table + API query endpoint
   - SIEM export endpoint for anomaly/policy/operations/audit bundles
+- Added runtime operations observability enrichment:
+  - scheduler health derivation in operations status + metrics APIs
+  - active-session latest-action context in API responses and dashboard UI
+- Added containerization hardening:
+  - non-root runtime user in Docker image
+  - deterministic startup entrypoint with migration switch
+  - Docker build-context reduction via `.dockerignore`
 - Added CI pipeline:
-  - `.github/workflows/ci.yml` (lint, type-check, migration, tests)
+  - `.github/workflows/ci.yml` (lint, type-check, migration replay, tests, Docker build smoke)
 
 ### Validation evidence
 
 - Fresh migration chain verified to head `006` on isolated Postgres container
 - Integration test `tests/integration/test_observability_api.py` passes against migrated DB
-- Full local suite: `33 passed`
+- Full local suite: `34 passed`
 
 ## 1. Goal
 
