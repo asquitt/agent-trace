@@ -640,6 +640,7 @@ Response `200`:
 
 Query params:
 - `org_id` (required)
+- `deployment_id` (optional)
 - `status` (`open|acknowledged|resolved`, optional)
 - `severity` (`low|medium|high|critical`, optional)
 - `anomaly_type` (optional)
@@ -652,6 +653,7 @@ Response `200`: paginated anomaly list.
 
 Query params:
 - `org_id` (required)
+- `deployment_id` (optional)
 - `status` (`open|acknowledged|resolved`, optional)
 - `severity` (`low|medium|high|critical`, optional)
 - `anomaly_type` (optional)

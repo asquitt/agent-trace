@@ -115,6 +115,32 @@ class _AnomalyGroupAccumulator(TypedDict):
     resolved_count: int
 
 
+def _anomaly_scope_filters(
+    *,
+    org_id: str,
+    from_time: datetime,
+    to_time: datetime,
+    status: Optional[AnomalyStatus] = None,
+    severity: Optional[AnomalySeverity] = None,
+    anomaly_type: Optional[AnomalyType] = None,
+    deployment_id: Optional[UUID] = None,
+) -> list[Any]:
+    filters: list[Any] = [
+        AnomalyEvent.detected_at >= from_time,
+        AnomalyEvent.detected_at <= to_time,
+        AgentDeployment.org_id == org_id,
+    ]
+    if status:
+        filters.append(AnomalyEvent.status == status.value)
+    if severity:
+        filters.append(AnomalyEvent.severity == severity.value)
+    if anomaly_type:
+        filters.append(AnomalyEvent.anomaly_type == anomaly_type.value)
+    if deployment_id:
+        filters.append(AnomalyEvent.deployment_id == deployment_id)
+    return filters
+
+
 @overload
 def _to_db_datetime(value: None) -> None: ...
 
@@ -2202,6 +2228,7 @@ async def list_anomalies(
     storage: StorageDep,
     auth: AuthDep,
     org_id: str = Query(...),
+    deployment_id: Optional[UUID] = Query(None),
     status: Optional[AnomalyStatus] = Query(None),
     severity: Optional[AnomalySeverity] = Query(None),
     anomaly_type: Optional[AnomalyType] = Query(None),
@@ -2216,35 +2243,27 @@ async def list_anomalies(
     to_time = _to_db_datetime(to_time)
 
     offset = (page - 1) * page_size
+    anomaly_filters = _anomaly_scope_filters(
+        org_id=org_id,
+        from_time=from_time,
+        to_time=to_time,
+        status=status,
+        severity=severity,
+        anomaly_type=anomaly_type,
+        deployment_id=deployment_id,
+    )
     async with storage.session_factory() as session:
         query = (
             select(AnomalyEvent)
             .join(AgentDeployment, AnomalyEvent.deployment_id == AgentDeployment.id)
-            .where(
-                AnomalyEvent.detected_at >= from_time,
-                AnomalyEvent.detected_at <= to_time,
-                AgentDeployment.org_id == org_id,
-            )
+            .where(*anomaly_filters)
             .order_by(desc(AnomalyEvent.detected_at))
         )
         count_q = (
             select(func.count(AnomalyEvent.id))
             .join(AgentDeployment, AnomalyEvent.deployment_id == AgentDeployment.id)
-            .where(
-                AnomalyEvent.detected_at >= from_time,
-                AnomalyEvent.detected_at <= to_time,
-                AgentDeployment.org_id == org_id,
-            )
+            .where(*anomaly_filters)
         )
-        if status:
-            query = query.where(AnomalyEvent.status == status.value)
-            count_q = count_q.where(AnomalyEvent.status == status.value)
-        if severity:
-            query = query.where(AnomalyEvent.severity == severity.value)
-            count_q = count_q.where(AnomalyEvent.severity == severity.value)
-        if anomaly_type:
-            query = query.where(AnomalyEvent.anomaly_type == anomaly_type.value)
-            count_q = count_q.where(AnomalyEvent.anomaly_type == anomaly_type.value)
 
         result = await session.execute(query.limit(page_size + 1).offset(offset))
         rows = list(result.scalars().all())
@@ -2268,6 +2287,7 @@ async def list_anomaly_groups(
     storage: StorageDep,
     auth: AuthDep,
     org_id: str = Query(...),
+    deployment_id: Optional[UUID] = Query(None),
     status: Optional[AnomalyStatus] = Query(None),
     severity: Optional[AnomalySeverity] = Query(None),
     anomaly_type: Optional[AnomalyType] = Query(None),
@@ -2280,25 +2300,23 @@ async def list_anomaly_groups(
     _enforce_org_scope(auth, org_id)
     from_time = _to_db_datetime(from_time)
     to_time = _to_db_datetime(to_time)
+    anomaly_filters = _anomaly_scope_filters(
+        org_id=org_id,
+        from_time=from_time,
+        to_time=to_time,
+        status=status,
+        severity=severity,
+        anomaly_type=anomaly_type,
+        deployment_id=deployment_id,
+    )
 
     async with storage.session_factory() as session:
         query = (
             select(AnomalyEvent)
             .join(AgentDeployment, AnomalyEvent.deployment_id == AgentDeployment.id)
-            .where(
-                AnomalyEvent.detected_at >= from_time,
-                AnomalyEvent.detected_at <= to_time,
-                AgentDeployment.org_id == org_id,
-            )
+            .where(*anomaly_filters)
             .order_by(desc(AnomalyEvent.detected_at))
         )
-        if status:
-            query = query.where(AnomalyEvent.status == status.value)
-        if severity:
-            query = query.where(AnomalyEvent.severity == severity.value)
-        if anomaly_type:
-            query = query.where(AnomalyEvent.anomaly_type == anomaly_type.value)
-
         result = await session.execute(query)
         rows = list(result.scalars().all())
 

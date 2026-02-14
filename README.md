@@ -100,6 +100,8 @@ src/
   - `GET /api/v1/observability/chains/{trace_id}`
   - `GET /api/v1/observability/dashboard/ui`
 
+Anomaly backlog endpoints support optional `deployment_id` query filtering for targeted triage.
+
 ### Platform Health/Ops
 
 - `GET /health`
