@@ -10,7 +10,7 @@ import structlog
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from ..config import Settings
-from ..models.observability import ObservabilityOperationRun
+from ..models.observability import ObservabilityOperationRun, SystemAuditEvent
 from .notifications import collect_policy_notification_targets, send_webhook_notifications
 from .observability_runtime import (
     DetectorConfig,
@@ -114,6 +114,7 @@ class ObservabilityOperationsScheduler:
         self,
         run_id: str,
         *,
+        org_id: str,
         success: bool,
         detector_summary: dict[str, Any],
         policy_summary: dict[str, Any],
@@ -130,6 +131,26 @@ class ObservabilityOperationsScheduler:
             row.detector_summary = detector_summary
             row.policy_summary = policy_summary
             row.notification_summary = notification_summary
+            session.add(
+                SystemAuditEvent(
+                    occurred_at=_utcnow_naive(),
+                    actor_subject="system:scheduler",
+                    actor_roles=["system"],
+                    org_id=org_id,
+                    action="scheduler_run",
+                    resource_type="observability_operation_run",
+                    resource_id=str(row.id),
+                    request_id=None,
+                    success=success,
+                    details={
+                        "run_type": row.run_type,
+                        "error_message": error_message,
+                        "detector_summary": detector_summary,
+                        "policy_summary": policy_summary,
+                        "notification_summary": notification_summary,
+                    },
+                )
+            )
             await session.commit()
 
     async def run_once(self, org_id: str) -> dict[str, Any]:
@@ -189,6 +210,7 @@ class ObservabilityOperationsScheduler:
                 )
             await self._finish_run_row(
                 run_id,
+                org_id=org_id,
                 success=True,
                 detector_summary=detector_summary,
                 policy_summary=policy_summary,
@@ -197,6 +219,7 @@ class ObservabilityOperationsScheduler:
         except Exception as exc:
             await self._finish_run_row(
                 run_id,
+                org_id=org_id,
                 success=False,
                 detector_summary=detector_summary,
                 policy_summary=policy_summary,

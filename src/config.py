@@ -108,6 +108,10 @@ class Settings(BaseSettings):
             "(org '*' grants global access)"
         ),
     )
+    api_rate_limit_enabled: bool = Field(default=False)
+    api_rate_limit_requests_per_window: int = Field(default=240, ge=1, le=100000)
+    api_rate_limit_window_seconds: int = Field(default=60, ge=1, le=3600)
+    api_rate_limit_per_path: bool = Field(default=False)
 
     # CORS (for dashboard)
     cors_origins: list[str] = Field(

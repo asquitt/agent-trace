@@ -53,7 +53,7 @@ async def get_db_context() -> AsyncGenerator[AsyncSession, None]:
 
 async def init_db() -> None:
     """Initialize database connection."""
-    async with engine.begin() as conn:
+    async with engine.begin():
         logger.info("Database connection initialized", url=settings.database_url.split("@")[-1])
 
 

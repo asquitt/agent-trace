@@ -5,7 +5,7 @@ without requiring explicit context management.
 """
 
 from functools import wraps
-from typing import Any, Callable, Optional, ParamSpec, TypeVar
+from typing import Callable, Optional, ParamSpec, TypeVar
 
 from .context import get_current_context
 from .types import SpanType, TraceType
@@ -46,8 +46,6 @@ def traced(
                 from ..dependencies import get_tracer
 
                 tracer = get_tracer()
-
-            trace_name = name or func.__name__
 
             # Try to extract idea_id from various sources
             idea_id = _extract_idea_id(args, kwargs)

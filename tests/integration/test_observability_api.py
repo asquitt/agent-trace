@@ -119,6 +119,13 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     assert approvals_list_resp.status_code == 200
     assert approvals_list_resp.json()["total"] >= 1
 
+    audit_list_resp = client.get(
+        "/api/v1/observability/audit/events",
+        params={"org_id": org_id},
+    )
+    assert audit_list_resp.status_code == 200
+    assert audit_list_resp.json()["total"] >= 1
+
     delegation_resp = client.post(
         "/api/v1/observability/delegations",
         json={
@@ -268,6 +275,22 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     run_detail_resp = client.get(f"/api/v1/observability/operations/runs/{ops_run_id}")
     assert run_detail_resp.status_code == 200
     assert run_detail_resp.json()["id"] == ops_run_id
+
+    siem_export_resp = client.post(
+        "/api/v1/observability/exports/siem",
+        json={
+            "org_id": org_id,
+            "from": from_ts,
+            "to": to_ts,
+            "dry_run": True,
+            "include_anomalies": True,
+            "include_policy_events": True,
+            "include_operation_runs": True,
+            "include_audit_events": True,
+        },
+    )
+    assert siem_export_resp.status_code == 200
+    assert siem_export_resp.json()["counts"]["audit_events"] >= 1
 
     ui_resp = client.get("/api/v1/observability/dashboard/ui")
     assert ui_resp.status_code == 200

@@ -3,7 +3,7 @@
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
@@ -35,6 +35,7 @@ from ...models.observability import (
     PolicyActionType,
     PolicyStatus,
     SessionStatus,
+    SystemAuditEvent,
 )
 from ...security import AuthContext, require_org_access, require_roles
 from ...models.trace import AITrace
@@ -96,6 +97,12 @@ def _require_admin(auth: AuthContext) -> None:
 
 def _enforce_org_scope(auth: AuthContext, org_id: str) -> None:
     require_org_access(auth, org_id)
+
+
+def _request_id(request: Optional[Request]) -> Optional[str]:
+    if request is None:
+        return None
+    return getattr(request.state, "request_id", None)
 
 
 async def _dispatch_runtime_notifications(
@@ -161,6 +168,35 @@ async def _store_operation_run(
         await session.commit()
         await session.refresh(row)
         return str(row.id)
+
+
+async def _store_audit_event(
+    storage: StorageDep,
+    *,
+    auth: AuthContext,
+    org_id: Optional[str],
+    action: str,
+    resource_type: str,
+    resource_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+    success: bool = True,
+    details: Optional[dict[str, Any]] = None,
+) -> None:
+    async with storage.session_factory() as session:
+        row = SystemAuditEvent(
+            occurred_at=_utcnow_naive(),
+            actor_subject=auth.subject,
+            actor_roles=sorted(auth.roles),
+            org_id=org_id,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            request_id=request_id,
+            success=success,
+            details=details or {},
+        )
+        session.add(row)
+        await session.commit()
 
 
 class DeploymentUpsertRequest(BaseModel):
@@ -640,6 +676,56 @@ class OperationRunListResponse(BaseModel):
     has_more: bool
 
 
+class AuditEventResponse(BaseModel):
+    id: str
+    occurred_at: datetime
+    actor_subject: str
+    actor_roles: list[str] = Field(default_factory=list)
+    org_id: Optional[str] = None
+    action: str
+    resource_type: str
+    resource_id: Optional[str] = None
+    request_id: Optional[str] = None
+    success: bool
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class AuditEventListResponse(BaseModel):
+    events: list[AuditEventResponse]
+    total: int
+    page: int
+    page_size: int
+    has_more: bool
+
+
+class SiemExportRequest(BaseModel):
+    org_id: str
+    from_time: datetime = Field(alias="from")
+    to_time: datetime = Field(alias="to")
+    target_webhook: Optional[str] = None
+    dry_run: bool = True
+    include_anomalies: bool = True
+    include_policy_events: bool = True
+    include_operation_runs: bool = True
+    include_audit_events: bool = True
+    max_records_per_type: int = Field(default=1000, ge=1, le=10000)
+
+    model_config = {"populate_by_name": True}
+
+
+class SiemExportResponse(BaseModel):
+    export_id: str
+    org_id: str
+    from_time: datetime = Field(alias="from")
+    to_time: datetime = Field(alias="to")
+    dry_run: bool
+    counts: dict[str, int]
+    notification_result: Optional[dict[str, Any]] = None
+    sample: dict[str, Any] = Field(default_factory=dict)
+
+    model_config = {"populate_by_name": True}
+
+
 def _deployment_response(dep: AgentDeployment) -> DeploymentResponse:
     return DeploymentResponse(
         id=str(dep.id),
@@ -762,6 +848,22 @@ def _operation_run_response(row: ObservabilityOperationRun) -> OperationRunRespo
         policy_summary=row.policy_summary or {},
         notification_summary=row.notification_summary or {},
         metadata=row.run_metadata or {},
+    )
+
+
+def _audit_event_response(row: SystemAuditEvent) -> AuditEventResponse:
+    return AuditEventResponse(
+        id=str(row.id),
+        occurred_at=row.occurred_at,
+        actor_subject=row.actor_subject,
+        actor_roles=list(row.actor_roles or []),
+        org_id=row.org_id,
+        action=row.action,
+        resource_type=row.resource_type,
+        resource_id=row.resource_id,
+        request_id=row.request_id,
+        success=row.success,
+        details=row.details or {},
     )
 
 
@@ -1247,6 +1349,7 @@ async def create_budget_policy(
     payload: BudgetPolicyCreateRequest,
     storage: StorageDep,
     auth: AuthDep,
+    request: Request,
 ) -> BudgetPolicyResponse:
     _require_admin(auth)
     _enforce_org_scope(auth, payload.org_id)
@@ -1279,7 +1382,24 @@ async def create_budget_policy(
         session.add(row)
         await session.commit()
         await session.refresh(row)
-        return _budget_policy_response(row)
+        response = _budget_policy_response(row)
+
+    await _store_audit_event(
+        storage,
+        auth=auth,
+        org_id=payload.org_id,
+        action="budget_policy_create",
+        resource_type="budget_policy",
+        resource_id=response.id,
+        request_id=_request_id(request),
+        details={
+            "policy_name": payload.policy_name,
+            "scope_type": _enum_str(payload.scope_type),
+            "period_type": _enum_str(payload.period_type),
+            "action_on_breach": _enum_str(payload.action_on_breach),
+        },
+    )
+    return response
 
 
 @router.get("/budget-policies", response_model=BudgetPolicyListResponse)
@@ -1390,6 +1510,7 @@ async def create_policy_approval(
     storage: StorageDep,
     settings: SettingsDep,
     auth: AuthDep,
+    request: Request,
 ) -> PolicyApprovalResponse:
     _require_operator(auth)
     _enforce_org_scope(auth, payload.org_id)
@@ -1426,7 +1547,22 @@ async def create_policy_approval(
         session.add(row)
         await session.commit()
         await session.refresh(row)
-        return _policy_approval_response(row)
+        response = _policy_approval_response(row)
+
+    await _store_audit_event(
+        storage,
+        auth=auth,
+        org_id=payload.org_id,
+        action="policy_approval_create",
+        resource_type="policy_approval",
+        resource_id=response.id,
+        request_id=_request_id(request),
+        details={
+            "policy_id": str(payload.policy_id),
+            "expires_at": _to_iso(expires_at),
+        },
+    )
+    return response
 
 
 @router.post("/policy-approvals/{approval_id}/decision", response_model=PolicyApprovalResponse)
@@ -1435,6 +1571,7 @@ async def decide_policy_approval(
     payload: PolicyApprovalDecisionRequest,
     storage: StorageDep,
     auth: AuthDep,
+    request: Request,
 ) -> PolicyApprovalResponse:
     _require_admin(auth)
     if payload.decision not in {PolicyApprovalStatus.APPROVED, PolicyApprovalStatus.REJECTED}:
@@ -1456,7 +1593,18 @@ async def decide_policy_approval(
             row.decision_reason = "Approval expired before decision"
             await session.commit()
             await session.refresh(row)
-            return _policy_approval_response(row)
+            response = _policy_approval_response(row)
+            await _store_audit_event(
+                storage,
+                auth=auth,
+                org_id=row.org_id,
+                action="policy_approval_expired",
+                resource_type="policy_approval",
+                resource_id=response.id,
+                request_id=_request_id(request),
+                details={"policy_id": str(row.policy_id)},
+            )
+            return response
 
         row.status = payload.decision
         row.decided_by = payload.decided_by or auth.subject
@@ -1464,7 +1612,22 @@ async def decide_policy_approval(
         row.decision_reason = payload.reason
         await session.commit()
         await session.refresh(row)
-        return _policy_approval_response(row)
+        response = _policy_approval_response(row)
+
+    await _store_audit_event(
+        storage,
+        auth=auth,
+        org_id=response.org_id,
+        action="policy_approval_decision",
+        resource_type="policy_approval",
+        resource_id=response.id,
+        request_id=_request_id(request),
+        details={
+            "decision": response.status,
+            "policy_id": response.policy_id,
+        },
+    )
+    return response
 
 
 @router.get("/policy-approvals", response_model=PolicyApprovalListResponse)
@@ -1518,6 +1681,7 @@ async def evaluate_policies(
     storage: StorageDep,
     settings: SettingsDep,
     auth: AuthDep,
+    request: Request,
 ) -> PolicyEvaluationResponse:
     _require_operator(auth)
     _enforce_org_scope(auth, payload.org_id)
@@ -1553,6 +1717,21 @@ async def evaluate_policies(
             "endpoint": "/api/v1/observability/policies/evaluate",
             "execute_actions": payload.execute_actions,
             "notify": payload.notify,
+        },
+    )
+    await _store_audit_event(
+        storage,
+        auth=auth,
+        org_id=payload.org_id,
+        action="policy_evaluate",
+        resource_type="org",
+        resource_id=payload.org_id,
+        request_id=_request_id(request),
+        details={
+            "operation_run_id": operation_run_id,
+            "execute_actions": payload.execute_actions,
+            "notify": payload.notify,
+            "breached_policies": summary.get("breached_policies", 0),
         },
     )
     return PolicyEvaluationResponse(
@@ -1721,6 +1900,7 @@ async def run_detectors(
     storage: StorageDep,
     settings: SettingsDep,
     auth: AuthDep,
+    request: Request,
 ) -> DetectorRunResponse:
     _require_operator(auth)
     _enforce_org_scope(auth, payload.org_id)
@@ -1780,6 +1960,22 @@ async def run_detectors(
             "notify": payload.notify,
         },
     )
+    await _store_audit_event(
+        storage,
+        auth=auth,
+        org_id=payload.org_id,
+        action="detectors_run",
+        resource_type="org",
+        resource_id=payload.org_id,
+        request_id=_request_id(request),
+        details={
+            "operation_run_id": operation_run_id,
+            "auto_evaluate_policies": payload.auto_evaluate_policies,
+            "execute_policy_actions": payload.execute_policy_actions,
+            "notify": payload.notify,
+            "created_anomalies": detector_summary.get("total_created", 0),
+        },
+    )
     return DetectorRunResponse(
         detector_run=detector_summary,
         policy_evaluation=policy_evaluation,
@@ -1794,6 +1990,7 @@ async def run_operations_cycle(
     storage: StorageDep,
     settings: SettingsDep,
     auth: AuthDep,
+    request: Request,
 ) -> RuntimeOperationsRunResponse:
     _require_operator(auth)
     _enforce_org_scope(auth, payload.org_id)
@@ -1850,6 +2047,22 @@ async def run_operations_cycle(
         notification_summary=notification_result,
         metadata={
             "endpoint": "/api/v1/observability/operations/run",
+            "run_detectors": payload.run_detectors,
+            "run_policies": payload.run_policies,
+            "execute_policy_actions": payload.execute_policy_actions,
+            "notify": payload.notify,
+        },
+    )
+    await _store_audit_event(
+        storage,
+        auth=auth,
+        org_id=payload.org_id,
+        action="operations_run",
+        resource_type="org",
+        resource_id=payload.org_id,
+        request_id=_request_id(request),
+        details={
+            "operation_run_id": operation_run_id,
             "run_detectors": payload.run_detectors,
             "run_policies": payload.run_policies,
             "execute_policy_actions": payload.execute_policy_actions,
@@ -1948,6 +2161,278 @@ async def get_operation_run(
             raise HTTPException(status_code=404, detail="Operation run not found")
         _enforce_org_scope(auth, row.org_id)
         return _operation_run_response(row)
+
+
+@router.get("/audit/events", response_model=AuditEventListResponse)
+async def list_audit_events(
+    storage: StorageDep,
+    auth: AuthDep,
+    org_id: Optional[str] = Query(None),
+    action: Optional[str] = Query(None),
+    from_time: Optional[datetime] = Query(None, alias="from"),
+    to_time: Optional[datetime] = Query(None, alias="to"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+) -> AuditEventListResponse:
+    _require_admin(auth)
+    if org_id:
+        _enforce_org_scope(auth, org_id)
+    elif not auth.is_global_admin:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="org_id is required for non-global-admin access",
+        )
+
+    from_time = _to_db_datetime(from_time)
+    to_time = _to_db_datetime(to_time)
+    offset = (page - 1) * page_size
+
+    async with storage.session_factory() as session:
+        query = select(SystemAuditEvent).order_by(desc(SystemAuditEvent.occurred_at))
+        count_q = select(func.count(SystemAuditEvent.id))
+
+        if org_id:
+            query = query.where(SystemAuditEvent.org_id == org_id)
+            count_q = count_q.where(SystemAuditEvent.org_id == org_id)
+        if action:
+            query = query.where(SystemAuditEvent.action == action)
+            count_q = count_q.where(SystemAuditEvent.action == action)
+        if from_time:
+            query = query.where(SystemAuditEvent.occurred_at >= from_time)
+            count_q = count_q.where(SystemAuditEvent.occurred_at >= from_time)
+        if to_time:
+            query = query.where(SystemAuditEvent.occurred_at <= to_time)
+            count_q = count_q.where(SystemAuditEvent.occurred_at <= to_time)
+
+        rows = list((await session.execute(query.limit(page_size + 1).offset(offset))).scalars().all())
+        has_more = len(rows) > page_size
+        rows = rows[:page_size]
+        total = int((await session.execute(count_q)).scalar() or 0)
+
+        return AuditEventListResponse(
+            events=[_audit_event_response(row) for row in rows],
+            total=total,
+            page=page,
+            page_size=page_size,
+            has_more=has_more,
+        )
+
+
+@router.post("/exports/siem", response_model=SiemExportResponse)
+async def export_siem_events(
+    payload: SiemExportRequest,
+    storage: StorageDep,
+    settings: SettingsDep,
+    auth: AuthDep,
+    request: Request,
+) -> SiemExportResponse:
+    _require_admin(auth)
+    _enforce_org_scope(auth, payload.org_id)
+    from_time = _to_db_datetime(payload.from_time)
+    to_time = _to_db_datetime(payload.to_time)
+    if from_time is None or to_time is None:
+        raise HTTPException(status_code=400, detail="from and to are required")
+    if to_time < from_time:
+        raise HTTPException(status_code=400, detail="to must be >= from")
+
+    export_id = str(uuid4())
+    anomalies: list[dict[str, Any]] = []
+    policy_events: list[dict[str, Any]] = []
+    operation_runs: list[dict[str, Any]] = []
+    audit_events: list[dict[str, Any]] = []
+
+    async with storage.session_factory() as session:
+        if payload.include_anomalies:
+            anomaly_rows = list(
+                (
+                    await session.execute(
+                        select(AnomalyEvent)
+                        .join(AgentDeployment, AnomalyEvent.deployment_id == AgentDeployment.id)
+                        .where(
+                            AgentDeployment.org_id == payload.org_id,
+                            AnomalyEvent.detected_at >= from_time,
+                            AnomalyEvent.detected_at <= to_time,
+                        )
+                        .order_by(desc(AnomalyEvent.detected_at))
+                        .limit(payload.max_records_per_type)
+                    )
+                ).scalars().all()
+            )
+            anomalies = [
+                {
+                    "id": str(row.id),
+                    "anomaly_type": _enum_str(row.anomaly_type),
+                    "severity": _enum_str(row.severity),
+                    "status": _enum_str(row.status),
+                    "detector_name": row.detector_name,
+                    "title": row.title,
+                    "description": row.description,
+                    "detected_at": _to_iso(row.detected_at),
+                    "metadata": row.anomaly_metadata or {},
+                }
+                for row in anomaly_rows
+            ]
+
+        if payload.include_policy_events:
+            policy_event_rows = list(
+                (
+                    await session.execute(
+                        select(BudgetPolicyEvent, BudgetPolicy.policy_name)
+                        .join(BudgetPolicy, BudgetPolicyEvent.policy_id == BudgetPolicy.id)
+                        .where(
+                            BudgetPolicy.org_id == payload.org_id,
+                            BudgetPolicyEvent.triggered_at >= from_time,
+                            BudgetPolicyEvent.triggered_at <= to_time,
+                        )
+                        .order_by(desc(BudgetPolicyEvent.triggered_at))
+                        .limit(payload.max_records_per_type)
+                    )
+                ).all()
+            )
+            policy_events = [
+                {
+                    "id": str(row[0].id),
+                    "policy_id": str(row[0].policy_id),
+                    "policy_name": row[1],
+                    "trigger_type": row[0].trigger_type,
+                    "triggered_at": _to_iso(row[0].triggered_at),
+                    "observed_value": row[0].observed_value,
+                    "threshold_value": row[0].threshold_value,
+                    "action_executed": _enum_str(row[0].action_executed),
+                    "action_status": row[0].action_status,
+                    "details": row[0].details or {},
+                }
+                for row in policy_event_rows
+            ]
+
+        if payload.include_operation_runs:
+            operation_run_rows = list(
+                (
+                    await session.execute(
+                        select(ObservabilityOperationRun)
+                        .where(
+                            ObservabilityOperationRun.org_id == payload.org_id,
+                            ObservabilityOperationRun.started_at >= from_time,
+                            ObservabilityOperationRun.started_at <= to_time,
+                        )
+                        .order_by(desc(ObservabilityOperationRun.started_at))
+                        .limit(payload.max_records_per_type)
+                    )
+                ).scalars().all()
+            )
+            operation_runs = [
+                {
+                    "id": str(row.id),
+                    "run_type": row.run_type,
+                    "started_at": _to_iso(row.started_at),
+                    "completed_at": _to_iso(row.completed_at),
+                    "success": row.success,
+                    "error_message": row.error_message,
+                    "detector_summary": row.detector_summary or {},
+                    "policy_summary": row.policy_summary or {},
+                    "notification_summary": row.notification_summary or {},
+                }
+                for row in operation_run_rows
+            ]
+
+        if payload.include_audit_events:
+            audit_rows = list(
+                (
+                    await session.execute(
+                        select(SystemAuditEvent)
+                        .where(
+                            SystemAuditEvent.org_id == payload.org_id,
+                            SystemAuditEvent.occurred_at >= from_time,
+                            SystemAuditEvent.occurred_at <= to_time,
+                        )
+                        .order_by(desc(SystemAuditEvent.occurred_at))
+                        .limit(payload.max_records_per_type)
+                    )
+                ).scalars().all()
+            )
+            audit_events = [
+                {
+                    "id": str(row.id),
+                    "occurred_at": _to_iso(row.occurred_at),
+                    "actor_subject": row.actor_subject,
+                    "actor_roles": row.actor_roles or [],
+                    "action": row.action,
+                    "resource_type": row.resource_type,
+                    "resource_id": row.resource_id,
+                    "request_id": row.request_id,
+                    "success": row.success,
+                    "details": row.details or {},
+                }
+                for row in audit_rows
+            ]
+
+    counts = {
+        "anomalies": len(anomalies),
+        "policy_events": len(policy_events),
+        "operation_runs": len(operation_runs),
+        "audit_events": len(audit_events),
+    }
+    export_payload = {
+        "event_type": "observability_siem_export",
+        "export_id": export_id,
+        "org_id": payload.org_id,
+        "from": from_time.isoformat(),
+        "to": to_time.isoformat(),
+        "counts": counts,
+        "data": {
+            "anomalies": anomalies,
+            "policy_events": policy_events,
+            "operation_runs": operation_runs,
+            "audit_events": audit_events,
+        },
+    }
+
+    notification_result: Optional[dict[str, Any]] = None
+    if not payload.dry_run:
+        if not payload.target_webhook:
+            raise HTTPException(
+                status_code=400,
+                detail="target_webhook is required when dry_run=false",
+            )
+        notification_result = await send_webhook_notifications(
+            [payload.target_webhook],
+            export_payload,
+            timeout_seconds=settings.observability_notification_timeout_seconds,
+            max_attempts=settings.observability_notification_max_attempts,
+            retry_backoff_seconds=settings.observability_notification_retry_backoff_seconds,
+        )
+
+    await _store_audit_event(
+        storage,
+        auth=auth,
+        org_id=payload.org_id,
+        action="siem_export",
+        resource_type="org",
+        resource_id=payload.org_id,
+        request_id=_request_id(request),
+        details={
+            "export_id": export_id,
+            "counts": counts,
+            "dry_run": payload.dry_run,
+            "has_target_webhook": bool(payload.target_webhook),
+        },
+    )
+
+    return SiemExportResponse(
+        export_id=export_id,
+        org_id=payload.org_id,
+        from_time=from_time,
+        to_time=to_time,
+        dry_run=payload.dry_run,
+        counts=counts,
+        notification_result=notification_result,
+        sample={
+            "anomalies": anomalies[:2],
+            "policy_events": policy_events[:2],
+            "operation_runs": operation_runs[:2],
+            "audit_events": audit_events[:2],
+        },
+    )
 
 
 @router.get("/dashboard/fleet", response_model=FleetDashboardResponse)

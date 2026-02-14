@@ -1,8 +1,8 @@
 """Tests for the core tracing module."""
 
-import pytest
-from datetime import datetime, timezone
 from uuid import uuid4
+
+import pytest
 
 from src.tracing.context import TraceContext, get_current_context, set_current_context, reset_context
 from src.tracing.types import TraceType, SpanType, TraceStatus, SpanStatus

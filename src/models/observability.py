@@ -683,3 +683,27 @@ class ObservabilityOperationRun(Base):
         Index("ix_observability_operation_runs_org_started", "org_id", "started_at"),
         Index("ix_observability_operation_runs_run_type_started", "run_type", "started_at"),
     )
+
+
+class SystemAuditEvent(Base):
+    """Immutable-style audit event for control-plane actions."""
+
+    __tablename__ = "system_audit_events"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    occurred_at: Mapped[datetime] = mapped_column(nullable=False, index=True)
+    actor_subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    actor_roles: Mapped[Optional[list[str]]] = mapped_column(JSONB, default=list)
+    org_id: Mapped[Optional[str]] = mapped_column(String(255), index=True)
+    action: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    resource_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    resource_id: Mapped[Optional[str]] = mapped_column(String(255))
+    request_id: Mapped[Optional[str]] = mapped_column(String(255), index=True)
+    success: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    details: Mapped[Optional[dict]] = mapped_column(JSONB, default=dict)
+
+    __table_args__ = (
+        Index("ix_system_audit_events_org_occurred", "org_id", "occurred_at"),
+        Index("ix_system_audit_events_action_occurred", "action", "occurred_at"),
+        Index("ix_system_audit_events_request_id", "request_id"),
+    )

@@ -13,6 +13,7 @@
   - `alembic/versions/004_trace_dimension_linking.py`
   - `alembic/versions/005_observability_operation_runs.py`
   - `alembic/versions/006_policy_action_approvals.py`
+  - `alembic/versions/007_system_audit_events.py`
 - Added observability ORM domain model:
   - `src/models/observability.py`
 - Linked observability dimensions into tracing model + tracer context:
@@ -27,7 +28,7 @@
 - Validation completed:
   - Migration replay in isolated virtualenv: `upgrade head -> downgrade 001 -> upgrade head` succeeded
   - Endpoint smoke checks succeeded for deployment/session/action/delegation/anomaly/dashboard/cost/memory/anomaly-list/chains paths
-  - Automated tests pass: `19 passed, 1 skipped` (`tests/integration/test_observability_api.py`, `tests/unit/test_tracing.py`, `tests/unit/test_observability_runtime.py`, `tests/unit/test_notifications.py`, `tests/unit/test_security.py`)
+  - Automated tests pass: `22 passed, 1 skipped` (`tests/integration/test_observability_api.py`, `tests/unit/test_tracing.py`, `tests/unit/test_observability_runtime.py`, `tests/unit/test_notifications.py`, `tests/unit/test_security.py`, `tests/unit/test_rate_limit.py`)
 
 ## Phase 2 Runtime Control Addendum (Completed)
 
@@ -70,7 +71,7 @@
 
 ### Validation evidence
 
-- Full test suite: `19 passed, 1 skipped`
+- Full test suite: `22 passed, 1 skipped`
 - Live Postgres integration run: `tests/integration/test_observability_api.py` passed against isolated temporary Postgres with fresh `alembic upgrade head`
 - Verified:
   - budget breach evaluation
@@ -98,6 +99,10 @@
   - request-id and response-time headers middleware
   - liveness/readiness endpoints (`/health/live`, `/health/ready`)
   - JSON metrics endpoint (`/metrics`)
+- Added deeper production controls:
+  - configurable in-memory request rate limiting with response headers
+  - system audit events table + API query endpoint
+  - SIEM export endpoint for anomaly/policy/operations/audit bundles
 - Added CI pipeline:
   - `.github/workflows/ci.yml` (lint, type-check, migration, tests)
 
@@ -105,7 +110,7 @@
 
 - Fresh migration chain verified to head `006` on isolated Postgres container
 - Integration test `tests/integration/test_observability_api.py` passes against migrated DB
-- Full local suite: `19 passed, 1 skipped`
+- Full local suite: `22 passed, 1 skipped`
 
 ## 1. Goal
 

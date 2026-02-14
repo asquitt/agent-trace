@@ -13,12 +13,14 @@ AI Trace provides end-to-end traceability for autonomous agent systems and adds 
 - Multi-agent delegation chain tracing
 - Continuous control loops (scheduler), notifications, and run audit logs
 - Tenant-scoped API auth, RBAC, and shutdown approval workflow
+- Persistent system audit events and SIEM export endpoint
+- Request rate limiting with configurable windows
 
 ## Release Status
 
 **Current version:** `0.2.0`  
 **Maturity:** Beta  
-**Validation snapshot:** `19 passed, 1 skipped` (unit + integration in local environment)
+**Validation snapshot:** `22 passed, 1 skipped` (unit + integration in local environment)
 
 ## Core Capabilities
 
@@ -49,12 +51,14 @@ AI Trace provides end-to-end traceability for autonomous agent systems and adds 
 - Background scheduler for periodic detectors/policies
 - Outbound webhook notifications with retry/backoff
 - Persistent operation-run logs for manual and scheduled loops
+- Immutable-style system audit event log for control-plane activity
 
 ### 5) Security and Isolation
 
 - API key authentication (optional, configurable)
 - RBAC roles: `viewer`, `operator`, `admin`
 - Tenant scope enforcement by org (`X-Org-Id` + policy/org checks)
+- Configurable in-memory request rate limiting (`429` with limit headers)
 
 ## Architecture
 
@@ -109,6 +113,8 @@ src/
   - `GET /api/v1/observability/operations/status`
   - `GET /api/v1/observability/operations/runs`
   - `GET /api/v1/observability/operations/runs/{run_id}`
+  - `GET /api/v1/observability/audit/events`
+  - `POST /api/v1/observability/exports/siem`
 - Dashboards/Analytics:
   - `GET /api/v1/observability/dashboard/fleet`
   - `GET /api/v1/observability/costs/summary`
@@ -165,6 +171,10 @@ Use `.env` (see `.env.example`).
 - `API_KEYS` format:
   - `token:subject:role1|role2:org1|org2`
   - Use `*` org for global admin keys
+- `API_RATE_LIMIT_ENABLED`
+- `API_RATE_LIMIT_REQUESTS_PER_WINDOW`
+- `API_RATE_LIMIT_WINDOW_SECONDS`
+- `API_RATE_LIMIT_PER_PATH`
 
 ### Scheduler + Notifications
 

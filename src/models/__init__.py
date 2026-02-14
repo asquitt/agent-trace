@@ -26,6 +26,7 @@ from .observability import (
     PolicyActionType,
     PolicyStatus,
     SessionStatus,
+    SystemAuditEvent,
 )
 from .ranking import Ranking
 from .trace import (
@@ -57,6 +58,7 @@ __all__ = [
     "BudgetPolicyEvent",
     "PolicyActionApproval",
     "ObservabilityOperationRun",
+    "SystemAuditEvent",
     "AnomalyEvent",
     "DeploymentEnvironment",
     "SessionStatus",
