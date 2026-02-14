@@ -9,7 +9,7 @@ Usage:
 
 import asyncio
 import json
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
 import typer
@@ -297,7 +297,7 @@ def export_trace(
             raise typer.Exit(1)
 
         # Build export data
-        export_data = {
+        export_data: dict[str, Any] = {
             "trace": {
                 "id": str(trace.id),
                 "correlation_id": str(trace.correlation_id),
@@ -316,7 +316,7 @@ def export_trace(
         }
 
         for span in trace.spans or []:
-            span_data = {
+            span_data: dict[str, Any] = {
                 "id": str(span.id),
                 "name": span.name,
                 "span_type": span.span_type.value if hasattr(span.span_type, "value") else str(span.span_type),

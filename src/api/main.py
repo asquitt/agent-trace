@@ -4,10 +4,11 @@ import time
 from collections import defaultdict
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import Any
 from uuid import uuid4
 
 import structlog
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
@@ -88,39 +89,42 @@ async def request_observability_middleware(request: Request, call_next):  # type
     metrics["total_requests"] += 1
     metrics["in_flight"] += 1
     metrics["path_counts"][request.url.path] += 1
-    response: JSONResponse | None = None
+    async def _dispatch_with_rate_limit() -> Response:
+        limiter = getattr(request.app.state, "rate_limiter", None)
+        if limiter is None:
+            return await call_next(request)
+
+        principal = request.headers.get(settings.api_key_header) or request.headers.get(
+            "Authorization", "anonymous"
+        )
+        tenant = request.headers.get(settings.api_tenant_header, "-")
+        key = f"{principal}:{tenant}"
+        if settings.api_rate_limit_per_path:
+            key = f"{key}:{request.url.path}"
+        decision = limiter.allow(key)
+        if not decision.allowed:
+            blocked = JSONResponse(
+                status_code=429,
+                content={
+                    "detail": "Rate limit exceeded",
+                    "limit": decision.limit,
+                    "retry_after_seconds": decision.retry_after_seconds,
+                },
+            )
+            blocked.headers["Retry-After"] = str(max(int(decision.retry_after_seconds), 1))
+            blocked.headers["X-RateLimit-Limit"] = str(decision.limit)
+            blocked.headers["X-RateLimit-Remaining"] = "0"
+            blocked.headers["X-RateLimit-Reset"] = str(int(decision.reset_at_epoch))
+            return blocked
+
+        response = await call_next(request)
+        response.headers["X-RateLimit-Limit"] = str(decision.limit)
+        response.headers["X-RateLimit-Remaining"] = str(decision.remaining)
+        response.headers["X-RateLimit-Reset"] = str(int(decision.reset_at_epoch))
+        return response
 
     try:
-        limiter = getattr(request.app.state, "rate_limiter", None)
-        if limiter is not None:
-            principal = request.headers.get(settings.api_key_header) or request.headers.get(
-                "Authorization", "anonymous"
-            )
-            tenant = request.headers.get(settings.api_tenant_header, "-")
-            key = f"{principal}:{tenant}"
-            if settings.api_rate_limit_per_path:
-                key = f"{key}:{request.url.path}"
-            decision = limiter.allow(key)
-            if not decision.allowed:
-                response = JSONResponse(
-                    status_code=429,
-                    content={
-                        "detail": "Rate limit exceeded",
-                        "limit": decision.limit,
-                        "retry_after_seconds": decision.retry_after_seconds,
-                    },
-                )
-                response.headers["Retry-After"] = str(max(int(decision.retry_after_seconds), 1))
-                response.headers["X-RateLimit-Limit"] = str(decision.limit)
-                response.headers["X-RateLimit-Remaining"] = "0"
-                response.headers["X-RateLimit-Reset"] = str(int(decision.reset_at_epoch))
-            else:
-                response = await call_next(request)
-                response.headers["X-RateLimit-Limit"] = str(decision.limit)
-                response.headers["X-RateLimit-Remaining"] = str(decision.remaining)
-                response.headers["X-RateLimit-Reset"] = str(int(decision.reset_at_epoch))
-        else:
-            response = await call_next(request)
+        response = await _dispatch_with_rate_limit()
     except Exception:
         metrics["status_counts"][500] += 1
         logger.exception(
@@ -135,7 +139,6 @@ async def request_observability_middleware(request: Request, call_next):  # type
         metrics["total_duration_ms"] += elapsed_ms
         metrics["in_flight"] = max(metrics["in_flight"] - 1, 0)
 
-    assert response is not None
     metrics["status_counts"][response.status_code] += 1
     response.headers["X-Request-ID"] = request_id
     response.headers["X-Response-Time-Ms"] = f"{elapsed_ms:.2f}"
@@ -143,7 +146,7 @@ async def request_observability_middleware(request: Request, call_next):  # type
 
 
 @app.get("/health/live")
-async def health_live() -> dict:
+async def health_live() -> dict[str, str]:
     """Liveness check."""
     return {"status": "alive", "service": settings.service_name}
 
@@ -162,7 +165,7 @@ async def health_ready() -> JSONResponse:
 
 
 @app.get("/metrics")
-async def get_metrics(request: Request) -> dict:
+async def get_metrics(request: Request) -> dict[str, Any]:
     """Simple JSON metrics endpoint for uptime and request telemetry."""
     metrics = request.app.state.request_metrics
     uptime_seconds = int(time.time() - request.app.state.started_at)
@@ -193,13 +196,13 @@ async def get_metrics(request: Request) -> dict:
 
 
 @app.get("/health")
-async def health_check() -> dict:
+async def health_check() -> dict[str, str]:
     """Backward-compatible health endpoint."""
     return {"status": "healthy", "service": settings.service_name}
 
 
 @app.get("/")
-async def root() -> dict:
+async def root() -> dict[str, Any]:
     """Root endpoint with API information."""
     return {
         "service": "AI Trace API",

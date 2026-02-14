@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Optional
 from uuid import UUID
 
@@ -33,6 +33,7 @@ from ..models.observability import (
     PolicyStatus,
     SessionStatus,
 )
+from ..utils.time import to_naive_utc, utc_now_naive
 
 
 def _enum_value(value: Any) -> str:
@@ -50,16 +51,12 @@ def _action_priority(action: str) -> int:
 
 def ensure_naive_utc(value: Optional[datetime]) -> Optional[datetime]:
     """Normalize datetimes for DB columns stored without timezone."""
-    if value is None:
-        return None
-    if value.tzinfo is not None:
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
-    return value
+    return to_naive_utc(value)
 
 
 def utcnow_naive() -> datetime:
     """Current UTC timestamp compatible with TIMESTAMP WITHOUT TIME ZONE."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return utc_now_naive()
 
 
 @dataclass(frozen=True)

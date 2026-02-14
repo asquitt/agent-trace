@@ -1,8 +1,8 @@
 """Observability API endpoints for fleet/session/runtime monitoring."""
 
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from datetime import datetime, timedelta
+from typing import Any, Optional, overload
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
@@ -37,8 +37,8 @@ from ...models.observability import (
     SessionStatus,
     SystemAuditEvent,
 )
-from ...security import AuthContext, require_org_access, require_roles
 from ...models.trace import AITrace
+from ...security import AuthContext, require_org_access, require_roles
 from ...services.observability_runtime import (
     DetectorConfig,
     evaluate_budget_policies,
@@ -49,6 +49,7 @@ from ...services.notifications import (
     normalize_webhook_targets,
     send_webhook_notifications,
 )
+from ...utils.time import to_naive_utc, utc_now_iso, utc_now_naive
 
 router = APIRouter(prefix="/api/v1/observability", tags=["observability"])
 
@@ -61,16 +62,20 @@ def _enum_str(value: Any) -> str:
     return value.value if hasattr(value, "value") else str(value)
 
 
+@overload
+def _to_db_datetime(value: None) -> None: ...
+
+
+@overload
+def _to_db_datetime(value: datetime) -> datetime: ...
+
+
 def _to_db_datetime(value: Optional[datetime]) -> Optional[datetime]:
-    if value is None:
-        return None
-    if value.tzinfo is not None:
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
-    return value
+    return to_naive_utc(value)
 
 
 def _utcnow_naive() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return utc_now_naive()
 
 
 def _normalize_bucket(dt: datetime, granularity: str) -> datetime:
@@ -126,7 +131,7 @@ async def _dispatch_runtime_notifications(
         "org_id": org_id,
         "detector_summary": detector_summary or {},
         "policy_summary": policy_summary or {},
-        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "occurred_at": utc_now_iso(),
     }
     return await send_webhook_notifications(
         sorted(targets),
@@ -992,8 +997,6 @@ async def create_session(
 ) -> SessionResponse:
     _require_operator(auth)
     started_at = _to_db_datetime(payload.started_at)
-    if started_at is None:
-        raise HTTPException(status_code=400, detail="started_at is required")
 
     async with storage.session_factory() as session:
         deployment = await session.get(AgentDeployment, payload.deployment_id)
@@ -1843,8 +1846,6 @@ async def list_anomalies(
     _enforce_org_scope(auth, org_id)
     from_time = _to_db_datetime(from_time)
     to_time = _to_db_datetime(to_time)
-    if from_time is None or to_time is None:
-        raise HTTPException(status_code=400, detail="from and to are required")
 
     offset = (page - 1) * page_size
     async with storage.session_factory() as session:
@@ -2230,8 +2231,6 @@ async def export_siem_events(
     _enforce_org_scope(auth, payload.org_id)
     from_time = _to_db_datetime(payload.from_time)
     to_time = _to_db_datetime(payload.to_time)
-    if from_time is None or to_time is None:
-        raise HTTPException(status_code=400, detail="from and to are required")
     if to_time < from_time:
         raise HTTPException(status_code=400, detail="to must be >= from")
 
@@ -2418,20 +2417,22 @@ async def export_siem_events(
         },
     )
 
-    return SiemExportResponse(
-        export_id=export_id,
-        org_id=payload.org_id,
-        from_time=from_time,
-        to_time=to_time,
-        dry_run=payload.dry_run,
-        counts=counts,
-        notification_result=notification_result,
-        sample={
-            "anomalies": anomalies[:2],
-            "policy_events": policy_events[:2],
-            "operation_runs": operation_runs[:2],
-            "audit_events": audit_events[:2],
-        },
+    return SiemExportResponse.model_validate(
+        {
+            "export_id": export_id,
+            "org_id": payload.org_id,
+            "from": from_time,
+            "to": to_time,
+            "dry_run": payload.dry_run,
+            "counts": counts,
+            "notification_result": notification_result,
+            "sample": {
+                "anomalies": anomalies[:2],
+                "policy_events": policy_events[:2],
+                "operation_runs": operation_runs[:2],
+                "audit_events": audit_events[:2],
+            },
+        }
     )
 
 
@@ -2449,8 +2450,6 @@ async def get_fleet_dashboard(
     _enforce_org_scope(auth, org_id)
     from_time = _to_db_datetime(from_time)
     to_time = _to_db_datetime(to_time)
-    if from_time is None or to_time is None:
-        raise HTTPException(status_code=400, detail="from and to are required")
 
     async with storage.session_factory() as session:
         action_filters = [
@@ -2581,8 +2580,12 @@ async def get_fleet_dashboard(
             {"resource": row[0], "action_count": int(row[1] or 0)} for row in top_resources_rows
         ]
 
+        window = FleetWindow.model_validate(
+            {"from": from_time, "to": to_time, "granularity": granularity}
+        )
+
         return FleetDashboardResponse(
-            window=FleetWindow(from_time=from_time, to_time=to_time, granularity=granularity),
+            window=window,
             totals=FleetTotals(
                 active_sessions=active_sessions,
                 action_count=action_count,
@@ -2611,8 +2614,6 @@ async def get_cost_summary(
     _enforce_org_scope(auth, org_id)
     from_time = _to_db_datetime(from_time)
     to_time = _to_db_datetime(to_time)
-    if from_time is None or to_time is None:
-        raise HTTPException(status_code=400, detail="from and to are required")
 
     async with storage.session_factory() as session:
         action_filters = [
@@ -2742,8 +2743,6 @@ async def get_memory_consistency(
     _enforce_org_scope(auth, org_id)
     from_time = _to_db_datetime(from_time)
     to_time = _to_db_datetime(to_time)
-    if from_time is None or to_time is None:
-        raise HTTPException(status_code=400, detail="from and to are required")
 
     async with storage.session_factory() as session:
         filters = [

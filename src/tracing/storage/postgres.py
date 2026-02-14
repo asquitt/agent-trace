@@ -4,7 +4,7 @@ This module implements the StorageBackend protocol using PostgreSQL
 with async SQLAlchemy for high-performance trace storage.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Optional
 from uuid import UUID
 
@@ -13,6 +13,7 @@ from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ...models.trace import AITrace, AITraceReasoning, AITraceSpan, TraceStatus
+from ...utils.time import to_naive_utc
 from ..types import ReasoningData, SpanData, TraceData
 
 logger = structlog.get_logger(__name__)
@@ -20,10 +21,7 @@ logger = structlog.get_logger(__name__)
 
 def _to_db_datetime(value: str | datetime) -> datetime:
     """Normalize ISO or datetime input to naive UTC for DB columns."""
-    dt = datetime.fromisoformat(value) if isinstance(value, str) else value
-    if dt.tzinfo is not None:
-        return dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return dt
+    return to_naive_utc(value)
 
 
 class PostgresStorageBackend:

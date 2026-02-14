@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 from typing import Any, Optional
 
 import structlog
@@ -11,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from ..config import Settings
 from ..models.observability import ObservabilityOperationRun, SystemAuditEvent
+from ..utils.time import utc_now_iso, utc_now_naive
 from .notifications import collect_policy_notification_targets, send_webhook_notifications
 from .observability_runtime import (
     DetectorConfig,
@@ -19,14 +19,6 @@ from .observability_runtime import (
 )
 
 logger = structlog.get_logger(__name__)
-
-
-def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _utcnow_naive() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class ObservabilityOperationsScheduler:
@@ -95,7 +87,7 @@ class ObservabilityOperationsScheduler:
             row = ObservabilityOperationRun(
                 org_id=org_id,
                 run_type="scheduler",
-                started_at=_utcnow_naive(),
+                started_at=utc_now_naive(),
                 success=False,
                 run_metadata={
                     "source": "scheduler",
@@ -125,7 +117,7 @@ class ObservabilityOperationsScheduler:
             row = await session.get(ObservabilityOperationRun, run_id)
             if row is None:
                 return
-            row.completed_at = _utcnow_naive()
+            row.completed_at = utc_now_naive()
             row.success = success
             row.error_message = error_message
             row.detector_summary = detector_summary
@@ -133,7 +125,7 @@ class ObservabilityOperationsScheduler:
             row.notification_summary = notification_summary
             session.add(
                 SystemAuditEvent(
-                    occurred_at=_utcnow_naive(),
+                    occurred_at=utc_now_naive(),
                     actor_subject="system:scheduler",
                     actor_roles=["system"],
                     org_id=org_id,
@@ -155,7 +147,7 @@ class ObservabilityOperationsScheduler:
 
     async def run_once(self, org_id: str) -> dict[str, Any]:
         """Run one detectors + policy loop for a single org."""
-        run_started = _utcnow_iso()
+        run_started = utc_now_iso()
         detector_summary: dict[str, Any] = {}
         policy_summary: dict[str, Any] = {}
         notification_result: dict[str, Any] = {}
@@ -230,7 +222,7 @@ class ObservabilityOperationsScheduler:
 
         org_state = self._state["org_runs"].setdefault(org_id, {})
         org_state["last_started_at"] = run_started
-        org_state["last_completed_at"] = _utcnow_iso()
+        org_state["last_completed_at"] = utc_now_iso()
         org_state["last_detector_summary"] = detector_summary
         org_state["last_policy_summary"] = policy_summary
         org_state["last_notification_result"] = notification_result
@@ -245,11 +237,11 @@ class ObservabilityOperationsScheduler:
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():
-            self._state["last_tick_at"] = _utcnow_iso()
+            self._state["last_tick_at"] = utc_now_iso()
             try:
                 for org_id in self._settings.observability_scheduler_org_ids:
                     await self.run_once(org_id)
-                self._state["last_success_at"] = _utcnow_iso()
+                self._state["last_success_at"] = utc_now_iso()
                 self._state["last_error"] = None
             except Exception as exc:  # pragma: no cover - runtime infrastructure dependent
                 self._state["last_error"] = str(exc)

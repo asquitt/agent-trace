@@ -199,7 +199,7 @@ Source: {idea.source_type.value}"""
             )
 
             # Parse response
-            response_text = response.content[0].text if response.content else ""
+            response_text = self._extract_response_text(response)
             swot_data = self._parse_json_response(response_text)
 
             swot = SWOTAnalysis(
@@ -301,7 +301,7 @@ Score this idea on: {dim_name}"""
                 span_name=f"score_{dim_key}",
             )
 
-            response_text = response.content[0].text if response.content else ""
+            response_text = self._extract_response_text(response)
             score_data = self._parse_json_response(response_text)
 
             raw_score = float(score_data.get("score", 50))
@@ -384,7 +384,7 @@ Provide a recommendation and 3-5 action items."""
                 span_name="recommendation",
             )
 
-            response_text = response.content[0].text if response.content else ""
+            response_text = self._extract_response_text(response)
             rec_data = self._parse_json_response(response_text)
 
             recommendation = rec_data.get("recommendation", "Unable to generate recommendation")
@@ -402,6 +402,31 @@ Provide a recommendation and 3-5 action items."""
             )
 
             return recommendation, action_items
+
+    def _extract_response_text(self, response: object) -> str:
+        """Best-effort extraction of text blocks from provider responses."""
+        content = getattr(response, "content", None)
+        if not isinstance(content, list):
+            return ""
+
+        text_parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                text_parts.append(block)
+                continue
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        text_parts.append(text)
+                continue
+
+            if getattr(block, "type", None) == "text":
+                block_text = getattr(block, "text", None)
+                if isinstance(block_text, str):
+                    text_parts.append(block_text)
+
+        return "\n".join(text_parts)
 
     def _parse_json_response(self, text: str) -> dict:
         """Parse JSON from LLM response, handling markdown code blocks."""

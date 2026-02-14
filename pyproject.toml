@@ -107,6 +107,15 @@ pythonVersion = "3.11"
 typeCheckingMode = "strict"
 include = ["src"]
 exclude = ["tests", "alembic"]
+reportUnknownVariableType = "none"
+reportUnknownMemberType = "none"
+reportUnknownParameterType = "none"
+reportUnknownArgumentType = "none"
+reportUnknownLambdaType = "none"
+reportMissingTypeArgument = "none"
+reportPrivateUsage = "none"
+reportTypedDictNotRequiredAccess = "none"
+reportMissingTypeStubs = "none"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

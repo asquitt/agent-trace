@@ -1,7 +1,7 @@
 """Trace API endpoints for querying and exporting AI decision chains."""
 
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime
+from typing import Any, Optional, overload
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ...dependencies import AuthDep, StorageDep
 from ...models.trace import TraceStatus, TraceType
 from ...security import AuthContext, require_org_access, require_roles
+from ...utils.time import to_naive_utc
 
 router = APIRouter(prefix="/api/v1/traces", tags=["traces"])
 
@@ -76,7 +77,7 @@ class TraceResponse(BaseModel):
     estimated_cost_usd: float = 0.0
     error_message: Optional[str] = None
     tags: list[str] = Field(default_factory=list)
-    metadata: dict = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     spans: list[SpanResponse] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
@@ -155,12 +156,16 @@ def _resolve_trace_org_scope(auth: AuthContext, org_id: Optional[str]) -> Option
     )
 
 
+@overload
+def _to_db_datetime(value: None) -> None: ...
+
+
+@overload
+def _to_db_datetime(value: datetime) -> datetime: ...
+
+
 def _to_db_datetime(value: Optional[datetime]) -> Optional[datetime]:
-    if value is None:
-        return None
-    if value.tzinfo is not None:
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
-    return value
+    return to_naive_utc(value)
 
 
 @router.get("", response_model=TraceListResponse)
@@ -266,7 +271,15 @@ async def get_trace_metrics_summary(
         from_ts=from_ts_db,
         to_ts=to_ts_db,
     )
-    return MetricsSummaryResponse(**summary)
+    return MetricsSummaryResponse(
+        total_traces=int(summary.get("total_traces", 0)),
+        successful_traces=int(summary.get("successful_traces", 0)),
+        failed_traces=int(summary.get("failed_traces", 0)),
+        total_input_tokens=int(summary.get("total_input_tokens", 0)),
+        total_output_tokens=int(summary.get("total_output_tokens", 0)),
+        estimated_total_cost_usd=float(summary.get("estimated_total_cost_usd", 0.0)),
+        avg_duration_ms=float(summary.get("avg_duration_ms", 0.0)),
+    )
 
 
 @router.get("/{trace_id}", response_model=TraceResponse)
@@ -293,7 +306,7 @@ async def get_trace(
             detail="Trace has no org scope and requires global admin access",
         )
 
-    spans = []
+    spans: list[SpanResponse] = []
     for span in trace.spans or []:
         span_data = SpanResponse(
             id=str(span.id),
@@ -375,7 +388,7 @@ async def get_trace_reasoning(
             detail="Trace has no org scope and requires global admin access",
         )
 
-    reasoning_steps = []
+    reasoning_steps: list[ReasoningStepResponse] = []
     for span in trace.spans or []:
         for r in span.reasoning_steps or []:
             reasoning_steps.append(
@@ -437,7 +450,7 @@ async def export_trace_json(
     storage: StorageDep,
     auth: AuthDep,
     include_prompts: bool = Query(True, description="Include full prompts/responses"),
-) -> dict:
+) -> dict[str, Any]:
     """Export a trace as JSON for external analysis.
 
     Returns the complete trace data including all spans and reasoning steps.
@@ -455,7 +468,7 @@ async def export_trace_json(
         )
 
     # Build complete export
-    export_data = {
+    export_data: dict[str, Any] = {
         "trace": {
             "id": str(trace.id),
             "correlation_id": str(trace.correlation_id),

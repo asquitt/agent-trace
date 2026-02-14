@@ -4,10 +4,10 @@ This module provides a traced wrapper around the Anthropic client that
 automatically creates spans for each API call with full prompt/response capture.
 """
 
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import anthropic
-from anthropic import NOT_GIVEN, AsyncAnthropic
+from anthropic import AsyncAnthropic
 
 from ..context import get_current_context
 from ..tracer import Tracer
@@ -113,7 +113,7 @@ class TracedAnthropicClient:
         user_prompt = self._extract_user_prompt(messages)
 
         # Build input data for tracing
-        input_data = {
+        input_data: dict[str, int | float] = {
             "max_tokens": max_tokens,
             "message_count": len(messages),
         }
@@ -182,16 +182,23 @@ class TracedAnthropicClient:
         **kwargs: Any,
     ) -> anthropic.types.Message:
         """Make the raw API call without tracing."""
-        return await self.client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            system=system if system else NOT_GIVEN,
-            messages=messages,
-            temperature=temperature if temperature is not None else NOT_GIVEN,
-            top_p=top_p if top_p is not None else NOT_GIVEN,
-            top_k=top_k if top_k is not None else NOT_GIVEN,
-            **kwargs,
-        )
+        request_kwargs: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": messages,
+        }
+        if system:
+            request_kwargs["system"] = system
+        if temperature is not None:
+            request_kwargs["temperature"] = temperature
+        if top_p is not None:
+            request_kwargs["top_p"] = top_p
+        if top_k is not None:
+            request_kwargs["top_k"] = top_k
+        request_kwargs.update(kwargs)
+
+        create = cast(Any, self.client.messages.create)
+        return await create(**request_kwargs)
 
     def _extract_user_prompt(self, messages: list[dict[str, Any]]) -> str:
         """Extract user prompt from messages for tracing."""
@@ -221,8 +228,10 @@ class TracedAnthropicClient:
         """Extract text content from response."""
         text_parts = []
         for block in response.content:
-            if block.type == "text":
-                text_parts.append(block.text)
+            if getattr(block, "type", None) == "text":
+                block_text = getattr(block, "text", None)
+                if isinstance(block_text, str):
+                    text_parts.append(block_text)
         return "\n".join(text_parts)
 
     def calculate_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
