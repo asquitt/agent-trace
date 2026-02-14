@@ -32,8 +32,11 @@
   - Trace API/storage cleanup shipped:
     - `GET /api/v1/traces/metrics/summary` implemented with storage-backed aggregates
     - trace/span timestamp normalization to naive UTC in storage layer
+    - trace metrics `from/to` query timestamps normalized to naive UTC
     - span persistence fixed for `assistant_response` and `output_data`
     - list-traces detached-instance bug fixed via eager span loading
+    - list-traces `total` now honors `idea_id` and `correlation_id` filters
+    - `Idea` model enum mapping aligned with migration enum types (`source_type`, `idea_status`)
 
 ## Phase 2 Runtime Control Addendum (Completed)
 

@@ -220,8 +220,11 @@ GitHub Actions CI is included in:
 
 - Wired `GET /api/v1/traces/metrics/summary` into storage-backed aggregate metrics.
 - Normalized trace/span timestamp writes to naive UTC in PostgreSQL storage to avoid timezone write failures.
+- Normalized trace metrics `from/to` query timestamps to naive UTC before DB filtering.
 - Persisted `assistant_response`, `output_data`, and `error_message` in span writes.
 - Fixed trace list span counting by eager-loading spans (prevents detached-instance failures).
+- Fixed trace list pagination totals to honor `idea_id` and `correlation_id` filters.
+- Aligned `Idea` enum ORM mapping with migration-owned PostgreSQL enum types (`source_type`, `idea_status`).
 - Added trace integration e2e coverage: `tests/integration/test_traces_api.py`.
 
 ## Notable Documents

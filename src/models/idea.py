@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Index, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, ENUM as PG_ENUM, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
@@ -43,7 +43,19 @@ class Idea(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
 
     # Source identification
-    source_type: Mapped[SourceType] = mapped_column(nullable=False, index=True)
+    source_type: Mapped[SourceType] = mapped_column(
+        PG_ENUM(
+            "hackernews",
+            "indiehackers",
+            "ycombinator",
+            "producthunt",
+            "manual",
+            name="source_type",
+            create_type=False,
+        ),
+        nullable=False,
+        index=True,
+    )
     source_id: Mapped[str] = mapped_column(String(255), nullable=False)
     source_url: Mapped[Optional[str]] = mapped_column(String(2048))
 
@@ -60,7 +72,18 @@ class Idea(Base):
     comments_count: Mapped[Optional[int]] = mapped_column()
 
     # Processing
-    status: Mapped[IdeaStatus] = mapped_column(default=IdeaStatus.PENDING, index=True)
+    status: Mapped[IdeaStatus] = mapped_column(
+        PG_ENUM(
+            "pending",
+            "embedded",
+            "ranked",
+            "archived",
+            name="idea_status",
+            create_type=False,
+        ),
+        default=IdeaStatus.PENDING,
+        index=True,
+    )
     scraped_at: Mapped[datetime] = mapped_column(nullable=False)
 
     # Vector embedding (1536 dimensions for text-embedding-3-small)

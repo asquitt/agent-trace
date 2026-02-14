@@ -1,6 +1,6 @@
 """Trace API endpoints for querying and exporting AI decision chains."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -155,6 +155,14 @@ def _resolve_trace_org_scope(auth: AuthContext, org_id: Optional[str]) -> Option
     )
 
 
+def _to_db_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
 @router.get("", response_model=TraceListResponse)
 async def list_traces(
     storage: StorageDep,
@@ -195,6 +203,8 @@ async def list_traces(
         org_id=resolved_org_id,
         trace_type=trace_type.value if trace_type else None,
         status=status.value if status else None,
+        idea_id=idea_id,
+        correlation_id=correlation_id,
     )
 
     items = [
@@ -248,11 +258,13 @@ async def get_trace_metrics_summary(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="'from' must be less than or equal to 'to'",
         )
+    from_ts_db = _to_db_datetime(from_ts)
+    to_ts_db = _to_db_datetime(to_ts)
 
     summary = await storage.get_trace_metrics_summary(
         org_id=resolved_org_id,
-        from_ts=from_ts,
-        to_ts=to_ts,
+        from_ts=from_ts_db,
+        to_ts=to_ts_db,
     )
     return MetricsSummaryResponse(**summary)
 

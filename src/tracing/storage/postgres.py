@@ -315,19 +315,21 @@ class PostgresStorageBackend:
         org_id: Optional[str] = None,
         trace_type: Optional[str] = None,
         status: Optional[str] = None,
+        idea_id: Optional[int] = None,
+        correlation_id: Optional[UUID] = None,
     ) -> int:
         """Get count of traces matching filters.
 
         Args:
             trace_type: Filter by trace type
             status: Filter by status
+            idea_id: Filter by idea ID
+            correlation_id: Filter by correlation ID
 
         Returns:
             Count of matching traces
         """
         async with self.session_factory() as session:
-            from sqlalchemy import func
-
             query = select(func.count(AITrace.id))
 
             if org_id:
@@ -336,6 +338,10 @@ class PostgresStorageBackend:
                 query = query.where(AITrace.trace_type == trace_type)
             if status:
                 query = query.where(AITrace.status == status)
+            if idea_id:
+                query = query.where(AITrace.idea_id == idea_id)
+            if correlation_id:
+                query = query.where(AITrace.correlation_id == correlation_id)
 
             result = await session.execute(query)
             return result.scalar() or 0
