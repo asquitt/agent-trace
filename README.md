@@ -10,6 +10,7 @@ AI Trace extends classic LLM tracing into a control plane:
 
 - Fleet and session observability across deployments
 - Real-time anomaly detection for agent behavior
+- Anomaly deduplication/suppression with repeated-trigger aggregation
 - Memory consistency monitoring across distributed sessions
 - Multi-agent delegation chain tracing
 - Budget policy evaluation with runtime actions (`alert`, `throttle`, `require_approval`, `shutdown`)
@@ -24,8 +25,8 @@ AI Trace extends classic LLM tracing into a control plane:
 - Validation evidence:
   - `ruff check --select F src tests` passed
   - `pyright` passed (`0 errors`)
-  - `pytest -q` passed (`38 passed, 2 skipped`)
-  - `./scripts/run_full_e2e.sh` passed (fresh DB, migration replay, double test pass)
+  - `pytest -q` passed (`37 passed, 2 skipped`) in lightweight local run
+  - `./scripts/run_full_e2e.sh` passed (`39 passed`, fresh DB, migration replay, double test pass)
 
 ## Architecture
 
@@ -157,6 +158,8 @@ Configure via `.env` (see `.env.example`).
 - `OBSERVABILITY_SCHEDULER_RUN_POLICIES`
 - `OBSERVABILITY_SCHEDULER_EXECUTE_POLICY_ACTIONS`
 - `OBSERVABILITY_SCHEDULER_ENABLE_NOTIFICATIONS`
+- `OBSERVABILITY_DETECTOR_ANOMALY_DEDUPE_WINDOW_MINUTES`
+- `OBSERVABILITY_DETECTOR_ANOMALY_REOPEN_ACKNOWLEDGED`
 
 ### Notifications
 

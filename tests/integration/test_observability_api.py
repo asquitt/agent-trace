@@ -142,6 +142,22 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
         },
     )
     assert delegation_resp.status_code == 201
+    reverse_delegation_resp = client.post(
+        "/api/v1/observability/delegations",
+        json={
+            "trace_id": None,
+            "parent_session_id": child_session_id,
+            "child_session_id": session_id,
+            "status": "completed",
+            "delegation_reason": "Smoke reverse delegation",
+            "requested_capabilities": ["review"],
+            "started_at": from_ts,
+            "completed_at": to_ts,
+            "duration_ms": 60000,
+            "metadata": {},
+        },
+    )
+    assert reverse_delegation_resp.status_code == 201
 
     batch_resp = client.post(
         "/api/v1/observability/actions/batch",
@@ -321,12 +337,32 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
 
     detector_resp = client.post(
         "/api/v1/observability/detectors/run",
-        json={"org_id": org_id, "auto_evaluate_policies": True},
+        json={
+            "org_id": org_id,
+            "auto_evaluate_policies": True,
+            "anomaly_dedupe_window_minutes": 60,
+            "anomaly_reopen_acknowledged": True,
+        },
     )
     assert detector_resp.status_code == 200
     assert "detector_run" in detector_resp.json()
+    assert detector_resp.json()["detector_run"]["created_anomalies"] >= 1
     assert detector_resp.json()["notification_result"]["attempted"] == 0
     assert detector_resp.json()["operation_run_id"] is not None
+
+    detector_rerun_resp = client.post(
+        "/api/v1/observability/detectors/run",
+        json={
+            "org_id": org_id,
+            "auto_evaluate_policies": False,
+            "notify": False,
+            "anomaly_dedupe_window_minutes": 60,
+            "anomaly_reopen_acknowledged": True,
+        },
+    )
+    assert detector_rerun_resp.status_code == 200
+    assert detector_rerun_resp.json()["detector_run"]["created_anomalies"] == 0
+    assert detector_rerun_resp.json()["detector_run"]["deduplicated_anomalies"] >= 1
 
     ops_resp = client.post(
         "/api/v1/observability/operations/run",

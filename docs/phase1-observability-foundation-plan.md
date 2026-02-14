@@ -28,7 +28,7 @@
 - Validation completed:
   - Migration replay in isolated virtualenv: `upgrade head -> downgrade 001 -> upgrade head` succeeded
   - Endpoint smoke checks succeeded for deployment/session/action/delegation/anomaly/dashboard/cost/memory/anomaly-list/chains paths
-  - Automated tests pass: `38 passed` (`tests/integration/test_observability_api.py`, `tests/integration/test_traces_api.py`, `tests/unit/test_tracing.py`, `tests/unit/test_tracing_decorators.py`, `tests/unit/test_observability_runtime.py`, `tests/unit/test_notifications.py`, `tests/unit/test_security.py`, `tests/unit/test_rate_limit.py`, `tests/unit/test_time_utils.py`, `tests/unit/test_operations_scheduler.py`)
+  - Automated tests pass: `39 passed` (`tests/integration/test_observability_api.py`, `tests/integration/test_traces_api.py`, `tests/unit/test_tracing.py`, `tests/unit/test_tracing_decorators.py`, `tests/unit/test_observability_runtime.py`, `tests/unit/test_notifications.py`, `tests/unit/test_security.py`, `tests/unit/test_rate_limit.py`, `tests/unit/test_time_utils.py`, `tests/unit/test_operations_scheduler.py`)
   - Trace API/storage cleanup shipped:
     - `GET /api/v1/traces/metrics/summary` implemented with storage-backed aggregates
     - trace/span timestamp normalization to naive UTC in storage layer
@@ -64,7 +64,10 @@
     - SIEM export delivery path upgraded from webhook-only to generic notification target routing (`notification_targets` with legacy `target_webhook` compatibility)
     - notification unit coverage extended for cross-channel routing and payload dispatch behavior
     - integration coverage extended for policy simulation side-effect guarantees and SIEM export target validation
-    - full e2e runner re-validated after changes (`38 passed`, migration replay pass, second test pass)
+    - detector anomaly dedup/suppression shipped with repeated-trigger aggregation metadata and optional ACK->OPEN auto-reopen controls
+    - detector/runtime config extended with `anomaly_dedupe_window_minutes` + `anomaly_reopen_acknowledged` across API, scheduler, and env settings
+    - integration coverage extended for repeated detector runs (`created_anomalies` then `deduplicated_anomalies`) on delegation-loop anomalies
+    - full e2e runner re-validated after changes (`39 passed`, migration replay pass, second test pass)
 
 ## Phase 2 Runtime Control Addendum (Completed)
 
@@ -107,7 +110,7 @@
 
 ### Validation evidence
 
-- Full test suite: `38 passed`
+- Full test suite: `39 passed`
 - Live Postgres integration run: `tests/integration/test_observability_api.py` passed against isolated temporary Postgres with fresh `alembic upgrade head`
 - Verified:
   - budget breach evaluation
@@ -153,7 +156,7 @@
 
 - Fresh migration chain verified to head `006` on isolated Postgres container
 - Integration test `tests/integration/test_observability_api.py` passes against migrated DB
-- Full local suite: `38 passed`
+- Full local suite: `39 passed`
 
 ## 1. Goal
 

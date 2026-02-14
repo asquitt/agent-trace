@@ -8,6 +8,7 @@ from src.services.observability_runtime import (
     _action_priority,
     _find_cycles,
     _period_window_start,
+    _severity_rank,
     ensure_naive_utc,
 )
 
@@ -46,3 +47,9 @@ def test_action_priority_orders_enforcement() -> None:
     assert _action_priority("alert") < _action_priority("throttle")
     assert _action_priority("throttle") < _action_priority("require_approval")
     assert _action_priority("require_approval") < _action_priority("shutdown")
+
+
+def test_severity_rank_orders_levels() -> None:
+    assert _severity_rank("low") < _severity_rank("medium")
+    assert _severity_rank("medium") < _severity_rank("high")
+    assert _severity_rank("high") < _severity_rank("critical")

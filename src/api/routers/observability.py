@@ -707,6 +707,8 @@ class DetectorRunRequest(BaseModel):
     cost_spike_multiplier: float = Field(default=5.0, ge=1.0, le=100.0)
     unusual_resource_min_calls: int = Field(default=3, ge=1, le=1000)
     memory_divergence_threshold: float = Field(default=0.30, ge=0.0, le=1.0)
+    anomaly_dedupe_window_minutes: int = Field(default=30, ge=1, le=1440)
+    anomaly_reopen_acknowledged: bool = True
     auto_evaluate_policies: bool = True
     execute_policy_actions: bool = True
     notify: bool = True
@@ -735,6 +737,8 @@ class RuntimeOperationsRunRequest(BaseModel):
     cost_spike_multiplier: float = Field(default=5.0, ge=1.0, le=100.0)
     unusual_resource_min_calls: int = Field(default=3, ge=1, le=1000)
     memory_divergence_threshold: float = Field(default=0.30, ge=0.0, le=1.0)
+    anomaly_dedupe_window_minutes: int = Field(default=30, ge=1, le=1440)
+    anomaly_reopen_acknowledged: bool = True
     extra_notification_targets: list[str] = Field(default_factory=list, alias="extra_webhook_targets")
 
     model_config = {"populate_by_name": True}
@@ -2176,6 +2180,8 @@ async def run_detectors(
         cost_spike_multiplier=payload.cost_spike_multiplier,
         unusual_resource_min_calls=payload.unusual_resource_min_calls,
         memory_divergence_threshold=payload.memory_divergence_threshold,
+        anomaly_dedupe_window_minutes=payload.anomaly_dedupe_window_minutes,
+        anomaly_reopen_acknowledged=payload.anomaly_reopen_acknowledged,
     )
 
     async with storage.session_factory() as session:
@@ -2221,6 +2227,8 @@ async def run_detectors(
             "endpoint": "/api/v1/observability/detectors/run",
             "auto_evaluate_policies": payload.auto_evaluate_policies,
             "execute_policy_actions": payload.execute_policy_actions,
+            "anomaly_dedupe_window_minutes": payload.anomaly_dedupe_window_minutes,
+            "anomaly_reopen_acknowledged": payload.anomaly_reopen_acknowledged,
             "notify": payload.notify,
         },
     )
@@ -2236,8 +2244,11 @@ async def run_detectors(
             "operation_run_id": operation_run_id,
             "auto_evaluate_policies": payload.auto_evaluate_policies,
             "execute_policy_actions": payload.execute_policy_actions,
+            "anomaly_dedupe_window_minutes": payload.anomaly_dedupe_window_minutes,
+            "anomaly_reopen_acknowledged": payload.anomaly_reopen_acknowledged,
             "notify": payload.notify,
-            "created_anomalies": detector_summary.get("total_created", 0),
+            "created_anomalies": detector_summary.get("created_anomalies", 0),
+            "deduplicated_anomalies": detector_summary.get("deduplicated_anomalies", 0),
         },
     )
     return DetectorRunResponse(
@@ -2269,6 +2280,8 @@ async def run_operations_cycle(
         cost_spike_multiplier=payload.cost_spike_multiplier,
         unusual_resource_min_calls=payload.unusual_resource_min_calls,
         memory_divergence_threshold=payload.memory_divergence_threshold,
+        anomaly_dedupe_window_minutes=payload.anomaly_dedupe_window_minutes,
+        anomaly_reopen_acknowledged=payload.anomaly_reopen_acknowledged,
     )
 
     async with storage.session_factory() as session:
@@ -2314,6 +2327,8 @@ async def run_operations_cycle(
             "run_detectors": payload.run_detectors,
             "run_policies": payload.run_policies,
             "execute_policy_actions": payload.execute_policy_actions,
+            "anomaly_dedupe_window_minutes": payload.anomaly_dedupe_window_minutes,
+            "anomaly_reopen_acknowledged": payload.anomaly_reopen_acknowledged,
             "notify": payload.notify,
         },
     )
@@ -2330,6 +2345,8 @@ async def run_operations_cycle(
             "run_detectors": payload.run_detectors,
             "run_policies": payload.run_policies,
             "execute_policy_actions": payload.execute_policy_actions,
+            "anomaly_dedupe_window_minutes": payload.anomaly_dedupe_window_minutes,
+            "anomaly_reopen_acknowledged": payload.anomaly_reopen_acknowledged,
             "notify": payload.notify,
         },
     )

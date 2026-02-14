@@ -141,6 +141,8 @@ class Settings(BaseSettings):
     observability_detector_cost_spike_multiplier: float = Field(default=5.0, ge=1.0, le=100.0)
     observability_detector_unusual_resource_min_calls: int = Field(default=3, ge=1, le=1000)
     observability_detector_memory_divergence_threshold: float = Field(default=0.30, ge=0.0, le=1.0)
+    observability_detector_anomaly_dedupe_window_minutes: int = Field(default=30, ge=1, le=1440)
+    observability_detector_anomaly_reopen_acknowledged: bool = Field(default=True)
 
     # Notification dispatch
     observability_notification_webhooks: list[str] = Field(default_factory=list)

@@ -117,10 +117,12 @@ def _runtime_summary_text(payload: dict[str, Any]) -> str:
     detector_summary = payload.get("detector_summary") or {}
     policy_summary = payload.get("policy_summary") or {}
     created_anomalies = int(detector_summary.get("created_anomalies", 0) or 0)
+    deduplicated_anomalies = int(detector_summary.get("deduplicated_anomalies", 0) or 0)
     breached_policies = int(policy_summary.get("breached_policies", 0) or 0)
     return (
         f"AI Trace {event_type} org={org_id} "
-        f"anomalies={created_anomalies} breached_policies={breached_policies}"
+        f"anomalies={created_anomalies} deduplicated={deduplicated_anomalies} "
+        f"breached_policies={breached_policies}"
     )
 
 

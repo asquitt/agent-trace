@@ -53,6 +53,17 @@ def ensure_naive_utc(value: Optional[datetime]) -> Optional[datetime]:
     """Normalize datetimes for DB columns stored without timezone."""
     return to_naive_utc(value)
 
+
+def _severity_rank(severity: AnomalySeverity | str) -> int:
+    severity_value = _enum_value(severity)
+    return {
+        AnomalySeverity.LOW.value: 1,
+        AnomalySeverity.MEDIUM.value: 2,
+        AnomalySeverity.HIGH.value: 3,
+        AnomalySeverity.CRITICAL.value: 4,
+    }.get(severity_value, 0)
+
+
 @dataclass(frozen=True)
 class DetectorConfig:
     """Tuning values for anomaly detectors."""
@@ -63,6 +74,8 @@ class DetectorConfig:
     cost_spike_multiplier: float = 5.0
     unusual_resource_min_calls: int = 3
     memory_divergence_threshold: float = 0.30
+    anomaly_dedupe_window_minutes: int = 30
+    anomaly_reopen_acknowledged: bool = True
 
 
 def _period_window_start(period: BudgetPeriodType, as_of: datetime) -> datetime:
@@ -509,8 +522,10 @@ async def _maybe_create_anomaly(
     description: str,
     detected_at: datetime,
     metadata: dict[str, Any],
-) -> Optional[AnomalyEvent]:
-    dedupe_window_start = detected_at - timedelta(minutes=30)
+    dedupe_window_minutes: int,
+    reopen_acknowledged: bool,
+) -> tuple[Optional[AnomalyEvent], bool]:
+    dedupe_window_start = detected_at - timedelta(minutes=max(dedupe_window_minutes, 1))
     duplicate_q = select(AnomalyEvent).where(
         AnomalyEvent.anomaly_type == anomaly_type.value,
         AnomalyEvent.status.in_([AnomalyStatus.OPEN.value, AnomalyStatus.ACKNOWLEDGED.value]),
@@ -528,8 +543,76 @@ async def _maybe_create_anomaly(
 
     duplicate = (await db.execute(duplicate_q.limit(1))).scalar_one_or_none()
     if duplicate:
-        return None
+        duplicate_metadata: dict[str, Any] = dict(duplicate.anomaly_metadata or {})
+        detection_stats: dict[str, Any] = dict(duplicate_metadata.get("detection_stats") or {})
+        existing_occurrences = int(detection_stats.get("occurrences") or 1)
+        detection_stats["occurrences"] = existing_occurrences + 1
+        detection_stats.setdefault("first_detected_at", duplicate.detected_at.isoformat())
+        detection_stats["last_detected_at"] = detected_at.isoformat()
+        detection_stats["last_detector_name"] = detector_name
+        detection_stats["highest_severity"] = (
+            _enum_value(severity)
+            if _severity_rank(severity) > _severity_rank(duplicate.severity)
+            else _enum_value(duplicate.severity)
+        )
+        if baseline_value is not None:
+            detection_stats["latest_baseline_value"] = baseline_value
+        if observed_value is not None:
+            detection_stats["latest_observed_value"] = observed_value
+        if deviation_ratio is not None:
+            detection_stats["latest_deviation_ratio"] = deviation_ratio
+        if score is not None:
+            detection_stats["latest_score"] = score
 
+        duplicate_metadata["detection_stats"] = detection_stats
+        duplicate_metadata["latest_detection_metadata"] = metadata
+        duplicate.anomaly_metadata = duplicate_metadata
+
+        duplicate.detected_at = detected_at
+        duplicate.detector_name = detector_name
+        duplicate.baseline_value = baseline_value
+        duplicate.observed_value = observed_value
+        duplicate.description = description
+
+        if deviation_ratio is not None:
+            if duplicate.deviation_ratio is None:
+                duplicate.deviation_ratio = deviation_ratio
+            else:
+                duplicate.deviation_ratio = max(float(duplicate.deviation_ratio), deviation_ratio)
+
+        if score is not None:
+            duplicate.score = max(float(duplicate.score or 0.0), score)
+
+        if _severity_rank(severity) > _severity_rank(duplicate.severity):
+            duplicate.severity = severity
+
+        if reopen_acknowledged and _enum_value(duplicate.status) == AnomalyStatus.ACKNOWLEDGED.value:
+            duplicate.status = AnomalyStatus.OPEN
+            duplicate.updated_by = "system:detectors"
+            duplicate.note = "Automatically reopened after repeated detector trigger."
+            duplicate.resolved_at = None
+
+        await db.flush()
+        return duplicate, False
+
+    detection_stats: dict[str, Any] = {
+        "occurrences": 1,
+        "first_detected_at": detected_at.isoformat(),
+        "last_detected_at": detected_at.isoformat(),
+        "last_detector_name": detector_name,
+        "highest_severity": _enum_value(severity),
+    }
+    if baseline_value is not None:
+        detection_stats["latest_baseline_value"] = baseline_value
+    if observed_value is not None:
+        detection_stats["latest_observed_value"] = observed_value
+    if deviation_ratio is not None:
+        detection_stats["latest_deviation_ratio"] = deviation_ratio
+    if score is not None:
+        detection_stats["latest_score"] = score
+
+    anomaly_metadata = dict(metadata)
+    anomaly_metadata["detection_stats"] = detection_stats
     anomaly = AnomalyEvent(
         deployment_id=deployment_id,
         session_id=session_id,
@@ -546,11 +629,11 @@ async def _maybe_create_anomaly(
         title=title,
         description=description,
         detected_at=detected_at,
-        anomaly_metadata=metadata,
+        anomaly_metadata=anomaly_metadata,
     )
     db.add(anomaly)
     await db.flush()
-    return anomaly
+    return anomaly, True
 
 
 def _severity_for_ratio(ratio: float) -> AnomalySeverity:
@@ -608,6 +691,7 @@ async def _detect_api_spikes(
     baseline_map = {(row[0], row[1]): int(row[2] or 0) for row in baseline_rows}
 
     created: list[str] = []
+    deduplicated: list[str] = []
     scanned = len(current_rows)
     for row in current_rows:
         deployment_id = row[0]
@@ -621,7 +705,7 @@ async def _detect_api_spikes(
         if ratio < config.api_spike_multiplier:
             continue
 
-        anomaly = await _maybe_create_anomaly(
+        anomaly, was_created = await _maybe_create_anomaly(
             db,
             deployment_id=deployment_id,
             session_id=None,
@@ -646,11 +730,21 @@ async def _detect_api_spikes(
                 "baseline_window_hours": config.baseline_window_hours,
                 "baseline_total": baseline_total,
             },
+            dedupe_window_minutes=config.anomaly_dedupe_window_minutes,
+            reopen_acknowledged=config.anomaly_reopen_acknowledged,
         )
-        if anomaly is not None:
+        if anomaly is not None and was_created:
             created.append(str(anomaly.id))
+        elif anomaly is not None:
+            deduplicated.append(str(anomaly.id))
 
-    return {"detector": "api_spike", "scanned": scanned, "created_ids": created}
+    return {
+        "detector": "api_spike",
+        "scanned": scanned,
+        "created_ids": created,
+        "deduplicated_ids": deduplicated,
+        "deduplicated_count": len(deduplicated),
+    }
 
 
 async def _detect_cost_spikes(
@@ -700,6 +794,7 @@ async def _detect_cost_spikes(
     baseline_map = {(row[0], row[1]): float(row[2] or 0.0) for row in baseline_rows}
 
     created: list[str] = []
+    deduplicated: list[str] = []
     scanned = len(current_rows)
     for row in current_rows:
         deployment_id = row[0]
@@ -713,7 +808,7 @@ async def _detect_cost_spikes(
         if ratio < config.cost_spike_multiplier:
             continue
 
-        anomaly = await _maybe_create_anomaly(
+        anomaly, was_created = await _maybe_create_anomaly(
             db,
             deployment_id=deployment_id,
             session_id=None,
@@ -738,11 +833,21 @@ async def _detect_cost_spikes(
                 "baseline_window_hours": config.baseline_window_hours,
                 "baseline_total_cost": baseline_total,
             },
+            dedupe_window_minutes=config.anomaly_dedupe_window_minutes,
+            reopen_acknowledged=config.anomaly_reopen_acknowledged,
         )
-        if anomaly is not None:
+        if anomaly is not None and was_created:
             created.append(str(anomaly.id))
+        elif anomaly is not None:
+            deduplicated.append(str(anomaly.id))
 
-    return {"detector": "cost_spike", "scanned": scanned, "created_ids": created}
+    return {
+        "detector": "cost_spike",
+        "scanned": scanned,
+        "created_ids": created,
+        "deduplicated_ids": deduplicated,
+        "deduplicated_count": len(deduplicated),
+    }
 
 
 async def _detect_unusual_resources(
@@ -794,6 +899,7 @@ async def _detect_unusual_resources(
         baseline_set.add((row[0], row[1], row[2]))
 
     created: list[str] = []
+    deduplicated: list[str] = []
     scanned = len(current_rows)
     for row in current_rows:
         deployment_id = row[0]
@@ -805,7 +911,7 @@ async def _detect_unusual_resources(
         if resource_count < config.unusual_resource_min_calls:
             continue
 
-        anomaly = await _maybe_create_anomaly(
+        anomaly, was_created = await _maybe_create_anomaly(
             db,
             deployment_id=deployment_id,
             session_id=None,
@@ -830,11 +936,21 @@ async def _detect_unusual_resources(
                 "current_window_minutes": config.current_window_minutes,
                 "baseline_window_hours": config.baseline_window_hours,
             },
+            dedupe_window_minutes=config.anomaly_dedupe_window_minutes,
+            reopen_acknowledged=config.anomaly_reopen_acknowledged,
         )
-        if anomaly is not None:
+        if anomaly is not None and was_created:
             created.append(str(anomaly.id))
+        elif anomaly is not None:
+            deduplicated.append(str(anomaly.id))
 
-    return {"detector": "unusual_resource_access", "scanned": scanned, "created_ids": created}
+    return {
+        "detector": "unusual_resource_access",
+        "scanned": scanned,
+        "created_ids": created,
+        "deduplicated_ids": deduplicated,
+        "deduplicated_count": len(deduplicated),
+    }
 
 
 async def _detect_memory_divergence(
@@ -898,6 +1014,7 @@ async def _detect_memory_divergence(
     baseline_map = {row[0]: (int(row[1] or 0), int(row[2] or 0)) for row in baseline_rows}
 
     created: list[str] = []
+    deduplicated: list[str] = []
     scanned = len(current_rows)
     for row in current_rows:
         deployment_id = row[0]
@@ -916,7 +1033,7 @@ async def _detect_memory_divergence(
             continue
 
         severity = AnomalySeverity.CRITICAL if current_rate >= 0.60 else AnomalySeverity.HIGH
-        anomaly = await _maybe_create_anomaly(
+        anomaly, was_created = await _maybe_create_anomaly(
             db,
             deployment_id=deployment_id,
             session_id=None,
@@ -941,11 +1058,21 @@ async def _detect_memory_divergence(
                 "baseline_diverged": baseline_diverged,
                 "baseline_total": baseline_total,
             },
+            dedupe_window_minutes=config.anomaly_dedupe_window_minutes,
+            reopen_acknowledged=config.anomaly_reopen_acknowledged,
         )
-        if anomaly is not None:
+        if anomaly is not None and was_created:
             created.append(str(anomaly.id))
+        elif anomaly is not None:
+            deduplicated.append(str(anomaly.id))
 
-    return {"detector": "memory_divergence", "scanned": scanned, "created_ids": created}
+    return {
+        "detector": "memory_divergence",
+        "scanned": scanned,
+        "created_ids": created,
+        "deduplicated_ids": deduplicated,
+        "deduplicated_count": len(deduplicated),
+    }
 
 
 def _find_cycles(edges: list[tuple[UUID, UUID]]) -> list[list[UUID]]:
@@ -984,6 +1111,7 @@ async def _detect_delegation_loops(
     org_id: str,
     as_of: datetime,
     current_start: datetime,
+    config: DetectorConfig,
 ) -> dict[str, Any]:
     edges_q = (
         select(
@@ -1005,13 +1133,14 @@ async def _detect_delegation_loops(
         edges_by_deployment[row[2]].append((row[0], row[1]))
 
     created: list[str] = []
+    deduplicated: list[str] = []
     scanned = len(rows)
     for deployment_id, edges in edges_by_deployment.items():
         cycles = _find_cycles(edges)
         if not cycles:
             continue
 
-        anomaly = await _maybe_create_anomaly(
+        anomaly, was_created = await _maybe_create_anomaly(
             db,
             deployment_id=deployment_id,
             session_id=None,
@@ -1031,11 +1160,21 @@ async def _detect_delegation_loops(
                 "cycles": [[str(node) for node in cycle] for cycle in cycles[:5]],
                 "cycle_count": len(cycles),
             },
+            dedupe_window_minutes=config.anomaly_dedupe_window_minutes,
+            reopen_acknowledged=config.anomaly_reopen_acknowledged,
         )
-        if anomaly is not None:
+        if anomaly is not None and was_created:
             created.append(str(anomaly.id))
+        elif anomaly is not None:
+            deduplicated.append(str(anomaly.id))
 
-    return {"detector": "delegation_loop", "scanned": scanned, "created_ids": created}
+    return {
+        "detector": "delegation_loop",
+        "scanned": scanned,
+        "created_ids": created,
+        "deduplicated_ids": deduplicated,
+        "deduplicated_count": len(deduplicated),
+    }
 
 
 async def run_anomaly_detectors(
@@ -1056,12 +1195,14 @@ async def run_anomaly_detectors(
         await _detect_cost_spikes(db, org_id, now, current_start, baseline_start, run_config),
         await _detect_unusual_resources(db, org_id, now, current_start, baseline_start, run_config),
         await _detect_memory_divergence(db, org_id, now, current_start, baseline_start, run_config),
-        await _detect_delegation_loops(db, org_id, now, current_start),
+        await _detect_delegation_loops(db, org_id, now, current_start, run_config),
     ]
 
     created_ids: list[str] = []
+    deduplicated_ids: list[str] = []
     for result in detector_results:
         created_ids.extend(result["created_ids"])
+        deduplicated_ids.extend(result["deduplicated_ids"])
 
     return {
         "run_at": now.isoformat(),
@@ -1075,4 +1216,6 @@ async def run_anomaly_detectors(
         "detectors": detector_results,
         "created_anomaly_ids": created_ids,
         "created_anomalies": len(created_ids),
+        "deduplicated_anomaly_ids": deduplicated_ids,
+        "deduplicated_anomalies": len(deduplicated_ids),
     }

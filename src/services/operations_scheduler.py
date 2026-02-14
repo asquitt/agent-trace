@@ -166,6 +166,12 @@ class ObservabilityOperationsScheduler:
             cost_spike_multiplier=self._settings.observability_detector_cost_spike_multiplier,
             unusual_resource_min_calls=self._settings.observability_detector_unusual_resource_min_calls,
             memory_divergence_threshold=self._settings.observability_detector_memory_divergence_threshold,
+            anomaly_dedupe_window_minutes=(
+                self._settings.observability_detector_anomaly_dedupe_window_minutes
+            ),
+            anomaly_reopen_acknowledged=(
+                self._settings.observability_detector_anomaly_reopen_acknowledged
+            ),
         )
 
         try:
