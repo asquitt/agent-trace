@@ -20,13 +20,25 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime controls:
 ## Current Product Status
 
 - Version: `0.2.0`
-- Maturity: `Beta`
-- Last validated: February 14, 2026
+- Maturity: `Production Candidate`
+- Last validated: February 14, 2026 (UTC)
 - Validation snapshot:
-  - `ruff check --select F src tests scripts` passed
+  - `ruff check --select F .` passed
   - `pyright` passed (`0 errors`)
-  - `pytest -q` passed (`58 passed, 2 skipped`) in lightweight local mode
+  - `pytest -q` passed (`60 passed`)
   - `./scripts/run_full_e2e.sh` passed (`60 passed`, migration replay, double test pass)
+  - `./scripts/run_perf_gate.sh` passed (`docs/reports/perf/perf-gate-20260214T194058Z.json`)
+  - `./scripts/backup_restore_drill.sh` passed (`docs/reports/dr/backup-restore-drill-20260214T194129Z.json`)
+  - `./scripts/security_gate.sh` passed (`docs/reports/security/security-gate-20260214T194129Z.json`)
+
+## Production Gate Automation
+
+- Scheduled gate workflow: `.github/workflows/production-gates.yml` (weekly + manual)
+- Gate bundle includes:
+  - Security gate (`bandit`, `pip-audit`, authz tests)
+  - Backup/restore disaster recovery drill
+  - Synthetic performance gate for core observability APIs
+- Report artifacts are published under `docs/reports/security`, `docs/reports/dr`, and `docs/reports/perf`.
 
 ## Core Capabilities
 
@@ -259,14 +271,18 @@ Configure with `.env` (see `.env.example`).
 7. Export SIEM bundles into security analytics workflows.
 8. Run deployment preflight checks (`ai-trace-preflight`) before release.
 9. Validate release path with full e2e (`./scripts/run_full_e2e.sh`).
+10. Run production gates (`./scripts/security_gate.sh`, `./scripts/backup_restore_drill.sh`, `./scripts/run_perf_gate.sh`).
 
 ## Quality Gates
 
 ```bash
 ai-trace-preflight
-ruff check --select F src tests scripts
+ruff check --select F .
 pyright
 pytest -q -p pytest_cov -p pytest_asyncio
+./scripts/security_gate.sh
+./scripts/backup_restore_drill.sh
+./scripts/run_perf_gate.sh
 docker build -f docker/Dockerfile .
 ./scripts/run_full_e2e.sh
 ```

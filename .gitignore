@@ -61,3 +61,8 @@ dashboard/.next/
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated production-gate artifacts
+docs/reports/**/*.dump
+docs/reports/**/*.json
+docs/reports/**/*.txt

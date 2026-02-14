@@ -3,7 +3,7 @@
 **Document date:** February 14, 2026  
 **Execution window:** February 17, 2026 to February 28, 2026  
 **Scope:** Build the production foundation for fleet/session/delegation observability before dashboard UI polish.
-**Implementation status:** Phase 1 + Phase 2 + Phase 3 production hardening + deep trace API/storage integration cleanup + strict CI type-gate stabilization completed on February 14, 2026 (accelerated delivery)
+**Implementation status:** Phase 1 + Phase 2 + Phase 3 production hardening + deep trace API/storage integration cleanup + strict CI type-gate stabilization + production gate sweep completed on February 14, 2026 (accelerated delivery)
 
 ## Implementation Log (Completed)
 
@@ -26,8 +26,17 @@
   - `src/api/routers/observability.py`
   - router wiring in `src/api/routers/__init__.py` and `src/api/main.py`
 - Validation completed:
+  - Static/runtime quality gates pass:
+    - `ruff check --select F .`
+    - `pyright` (`0 errors`)
+    - `pytest -q` (`60 passed`)
+    - `scripts/run_full_e2e.sh` (`60 passed`, migration replay pass, second test pass)
   - Migration replay in isolated virtualenv: `upgrade head -> downgrade 001 -> upgrade head` succeeded
   - Endpoint smoke checks succeeded for deployment/session/action/delegation/anomaly/dashboard/cost/memory/anomaly-list/chains paths
+  - Production gate artifacts generated and passing:
+    - perf gate: `docs/reports/perf/perf-gate-20260214T194058Z.json`
+    - DR drill: `docs/reports/dr/backup-restore-drill-20260214T194129Z.json`
+    - security gate: `docs/reports/security/security-gate-20260214T194129Z.json`
   - Automated tests pass: `60 passed` (`tests/integration/test_observability_api.py`, `tests/integration/test_traces_api.py`, `tests/unit/test_cli_production_preflight.py`, `tests/unit/test_observability_router_helpers.py`, `tests/unit/test_tracing.py`, `tests/unit/test_tracing_decorators.py`, `tests/unit/test_observability_runtime.py`, `tests/unit/test_notifications.py`, `tests/unit/test_security.py`, `tests/unit/test_rate_limit.py`, `tests/unit/test_time_utils.py`, `tests/unit/test_operations_scheduler.py`, `tests/unit/test_production_preflight.py`)
   - Trace API/storage cleanup shipped:
     - `GET /api/v1/traces/metrics/summary` implemented with storage-backed aggregates
