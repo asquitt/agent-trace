@@ -11,8 +11,10 @@ from src.services.notifications import (
     classify_notification_targets,
     collect_policy_notification_target_strings,
     collect_policy_notification_targets,
+    merge_runtime_notification_targets,
     normalize_webhook_targets,
     runtime_event_severity,
+    runtime_notification_gate_result,
     send_runtime_notifications,
     severity_rank,
     skipped_notification_result,
@@ -88,6 +90,30 @@ def test_collect_policy_notification_target_strings_keeps_channel_prefixes() -> 
     }
 
 
+def test_merge_runtime_notification_targets_deduplicates_sources() -> None:
+    merged = merge_runtime_notification_targets(
+        base_targets=["https://hooks.example.com/base", "pagerduty:shared-key"],
+        policy_summary={
+            "results": [
+                {
+                    "breaches": [{"trigger_type": "max_cost_usd"}],
+                    "notification_targets": [
+                        "https://hooks.example.com/base",
+                        "slack:https://hooks.slack.com/services/T000/B000/AAA",
+                    ],
+                }
+            ]
+        },
+        extra_targets=["pagerduty:shared-key", "https://hooks.example.com/extra"],
+    )
+    assert merged == [
+        "https://hooks.example.com/base",
+        "https://hooks.example.com/extra",
+        "pagerduty:shared-key",
+        "slack:https://hooks.slack.com/services/T000/B000/AAA",
+    ]
+
+
 def test_classify_notification_targets_splits_channels() -> None:
     target_set = classify_notification_targets(
         [
@@ -152,6 +178,44 @@ def test_skipped_notification_result_includes_skip_metadata() -> None:
     assert result["skip_reason"] == "below_min_severity"
     assert result["event_severity"] == "info"
     assert result["min_severity"] == "warning"
+
+
+def test_runtime_notification_gate_result_no_actionable() -> None:
+    result = runtime_notification_gate_result(
+        detector_summary={"created_anomalies": 0},
+        policy_summary={"breached_policies": 0},
+        only_on_actionable=True,
+        min_severity="warning",
+        max_attempts=3,
+        event_severity="info",
+    )
+    assert result is not None
+    assert result["skip_reason"] == "no_actionable_findings"
+
+
+def test_runtime_notification_gate_result_below_min_severity() -> None:
+    result = runtime_notification_gate_result(
+        detector_summary={"created_anomalies": 1},
+        policy_summary={"breached_policies": 0},
+        only_on_actionable=True,
+        min_severity="error",
+        max_attempts=2,
+        event_severity="warning",
+    )
+    assert result is not None
+    assert result["skip_reason"] == "below_min_severity"
+
+
+def test_runtime_notification_gate_result_allows_actionable_notification() -> None:
+    result = runtime_notification_gate_result(
+        detector_summary={"created_anomalies": 2},
+        policy_summary={"breached_policies": 0},
+        only_on_actionable=True,
+        min_severity="warning",
+        max_attempts=2,
+        event_severity="warning",
+    )
+    assert result is None
 
 
 @pytest.mark.asyncio

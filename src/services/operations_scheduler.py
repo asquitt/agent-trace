@@ -12,13 +12,12 @@ from ..config import Settings
 from ..models.observability import ObservabilityOperationRun, SystemAuditEvent
 from ..utils.time import utc_now_iso, utc_now_naive
 from .notifications import (
-    collect_policy_notification_target_strings,
+    merge_runtime_notification_targets,
     normalize_pagerduty_routing_keys,
     normalize_slack_webhook_targets,
     runtime_event_severity,
+    runtime_notification_gate_result,
     send_runtime_notifications,
-    severity_rank,
-    skipped_notification_result,
 )
 from .observability_runtime import (
     DetectorConfig,
@@ -198,8 +197,6 @@ class ObservabilityOperationsScheduler:
                 await session.commit()
 
             if self._settings.observability_scheduler_enable_notifications:
-                created_anomalies = int(detector_summary.get("created_anomalies", 0) or 0)
-                breached_policies = int(policy_summary.get("breached_policies", 0) or 0)
                 notification_payload = {
                     "event_type": "observability_scheduler_run",
                     "org_id": org_id,
@@ -209,27 +206,21 @@ class ObservabilityOperationsScheduler:
                 }
                 event_severity = runtime_event_severity(notification_payload)
                 min_severity = self._settings.observability_notification_min_severity
-                if (
-                    self._settings.observability_notification_only_on_actionable
-                    and created_anomalies == 0
-                    and breached_policies == 0
-                ):
-                    notification_result = skipped_notification_result(
-                        max_attempts=self._settings.observability_notification_max_attempts,
-                        reason="no_actionable_findings",
-                        event_severity=event_severity,
-                        min_severity=min_severity,
-                    )
-                elif severity_rank(event_severity) < severity_rank(min_severity):
-                    notification_result = skipped_notification_result(
-                        max_attempts=self._settings.observability_notification_max_attempts,
-                        reason="below_min_severity",
-                        event_severity=event_severity,
-                        min_severity=min_severity,
-                    )
+                gate_result = runtime_notification_gate_result(
+                    detector_summary=detector_summary,
+                    policy_summary=policy_summary,
+                    only_on_actionable=self._settings.observability_notification_only_on_actionable,
+                    min_severity=min_severity,
+                    max_attempts=self._settings.observability_notification_max_attempts,
+                    event_severity=event_severity,
+                )
+                if gate_result is not None:
+                    notification_result = gate_result
                 else:
-                    targets = list(self._settings.observability_notification_webhooks)
-                    targets.extend(collect_policy_notification_target_strings(policy_summary))
+                    targets = merge_runtime_notification_targets(
+                        base_targets=self._settings.observability_notification_webhooks,
+                        policy_summary=policy_summary,
+                    )
                     notification_result = await send_runtime_notifications(
                         targets,
                         notification_payload,

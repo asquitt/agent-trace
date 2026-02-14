@@ -69,6 +69,7 @@ dashboard = [
 
 [project.scripts]
 ai-trace = "src.cli.trace_viewer:app"
+ai-trace-preflight = "src.cli.production_preflight:main"
 
 [build-system]
 requires = ["hatchling"]

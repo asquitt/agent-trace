@@ -47,13 +47,12 @@ from ...services.observability_runtime import (
 )
 from ...services.notifications import (
     classify_notification_targets,
-    collect_policy_notification_target_strings,
+    merge_runtime_notification_targets,
     normalize_pagerduty_routing_keys,
     normalize_slack_webhook_targets,
     runtime_event_severity,
+    runtime_notification_gate_result,
     send_runtime_notifications,
-    severity_rank,
-    skipped_notification_result,
 )
 from ...utils.time import to_naive_utc, utc_now_iso, utc_now_naive
 
@@ -257,32 +256,24 @@ async def _dispatch_runtime_notifications(
         "policy_summary": policy_summary or {},
         "occurred_at": utc_now_iso(),
     }
-    created_anomalies = int((detector_summary or {}).get("created_anomalies", 0) or 0)
-    breached_policies = int((policy_summary or {}).get("breached_policies", 0) or 0)
     event_severity = runtime_event_severity(payload)
     min_severity = settings.observability_notification_min_severity
-    if (
-        settings.observability_notification_only_on_actionable
-        and created_anomalies == 0
-        and breached_policies == 0
-    ):
-        return skipped_notification_result(
-            max_attempts=settings.observability_notification_max_attempts,
-            reason="no_actionable_findings",
-            event_severity=event_severity,
-            min_severity=min_severity,
-        )
-    if severity_rank(event_severity) < severity_rank(min_severity):
-        return skipped_notification_result(
-            max_attempts=settings.observability_notification_max_attempts,
-            reason="below_min_severity",
-            event_severity=event_severity,
-            min_severity=min_severity,
-        )
+    gate_result = runtime_notification_gate_result(
+        detector_summary=detector_summary,
+        policy_summary=policy_summary,
+        only_on_actionable=settings.observability_notification_only_on_actionable,
+        min_severity=min_severity,
+        max_attempts=settings.observability_notification_max_attempts,
+        event_severity=event_severity,
+    )
+    if gate_result is not None:
+        return gate_result
 
-    raw_targets = list(settings.observability_notification_webhooks)
-    raw_targets.extend(collect_policy_notification_target_strings(policy_summary or {}))
-    raw_targets.extend(extra_targets or [])
+    raw_targets = merge_runtime_notification_targets(
+        base_targets=settings.observability_notification_webhooks,
+        policy_summary=policy_summary,
+        extra_targets=extra_targets,
+    )
     result = await send_runtime_notifications(
         raw_targets,
         payload,

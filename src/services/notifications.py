@@ -149,6 +149,19 @@ def collect_policy_notification_targets(summary: dict[str, Any]) -> list[str]:
     return normalize_webhook_targets(collect_policy_notification_target_strings(summary))
 
 
+def merge_runtime_notification_targets(
+    *,
+    base_targets: list[str],
+    policy_summary: dict[str, Any] | None = None,
+    extra_targets: list[str] | None = None,
+) -> list[str]:
+    """Merge, normalize, and deduplicate raw runtime notification target strings."""
+    targets = list(base_targets)
+    targets.extend(collect_policy_notification_target_strings(policy_summary or {}))
+    targets.extend(extra_targets or [])
+    return sorted({target.strip() for target in targets if target and target.strip()})
+
+
 def _runtime_summary_text(payload: dict[str, Any]) -> str:
     event_type = str(payload.get("event_type", "observability_event"))
     org_id = str(payload.get("org_id", "unknown-org"))
@@ -188,6 +201,38 @@ def runtime_event_severity(payload: dict[str, Any]) -> str:
     if created_anomalies > 0:
         return "warning"
     return "info"
+
+
+def runtime_notification_gate_result(
+    *,
+    detector_summary: dict[str, Any] | None,
+    policy_summary: dict[str, Any] | None,
+    only_on_actionable: bool,
+    min_severity: str,
+    max_attempts: int,
+    event_severity: str,
+) -> dict[str, Any] | None:
+    """Return skip payload when runtime notification should be suppressed."""
+    created_anomalies = int((detector_summary or {}).get("created_anomalies", 0) or 0)
+    breached_policies = int((policy_summary or {}).get("breached_policies", 0) or 0)
+
+    if only_on_actionable and created_anomalies == 0 and breached_policies == 0:
+        return skipped_notification_result(
+            max_attempts=max_attempts,
+            reason="no_actionable_findings",
+            event_severity=event_severity,
+            min_severity=min_severity,
+        )
+
+    if severity_rank(event_severity) < severity_rank(min_severity):
+        return skipped_notification_result(
+            max_attempts=max_attempts,
+            reason="below_min_severity",
+            event_severity=event_severity,
+            min_severity=min_severity,
+        )
+
+    return None
 
 
 def _slack_payload(payload: dict[str, Any]) -> dict[str, Any]:
