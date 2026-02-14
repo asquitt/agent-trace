@@ -38,6 +38,7 @@ class ObservabilityOperationsScheduler:
             "last_tick_at": None,
             "last_success_at": None,
             "last_error": None,
+            "last_tick_failures": [],
             "org_runs": {},
         }
 
@@ -238,14 +239,35 @@ class ObservabilityOperationsScheduler:
     async def _run_loop(self) -> None:
         while not self._stop.is_set():
             self._state["last_tick_at"] = utc_now_iso()
-            try:
-                for org_id in self._settings.observability_scheduler_org_ids:
+            tick_failures: list[dict[str, str]] = []
+            successful_runs = 0
+            for org_id in self._settings.observability_scheduler_org_ids:
+                try:
                     await self.run_once(org_id)
+                    successful_runs += 1
+                    org_state = self._state["org_runs"].setdefault(org_id, {})
+                    org_state["last_error"] = None
+                except Exception as exc:  # pragma: no cover - runtime infrastructure dependent
+                    error_message = str(exc)
+                    tick_failures.append({"org_id": org_id, "error": error_message})
+                    org_state = self._state["org_runs"].setdefault(org_id, {})
+                    org_state["last_error"] = error_message
+                    org_state["last_failed_at"] = utc_now_iso()
+                    logger.exception(
+                        "observability_scheduler_org_run_failed",
+                        org_id=org_id,
+                        error=error_message,
+                    )
+
+            if successful_runs > 0:
                 self._state["last_success_at"] = utc_now_iso()
+
+            if tick_failures:
+                self._state["last_error"] = f"{len(tick_failures)} org run(s) failed"
+                self._state["last_tick_failures"] = tick_failures
+            else:
                 self._state["last_error"] = None
-            except Exception as exc:  # pragma: no cover - runtime infrastructure dependent
-                self._state["last_error"] = str(exc)
-                logger.exception("observability_scheduler_tick_failed", error=str(exc))
+                self._state["last_tick_failures"] = []
 
             try:
                 await asyncio.wait_for(

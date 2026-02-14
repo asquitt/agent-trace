@@ -171,6 +171,29 @@ async def get_metrics(request: Request) -> dict[str, Any]:
     uptime_seconds = int(time.time() - request.app.state.started_at)
     total = int(metrics["total_requests"])
     avg_duration = float(metrics["total_duration_ms"] / total) if total else 0.0
+    scheduler = getattr(request.app.state, "observability_scheduler", None)
+    if scheduler is None:
+        scheduler_snapshot: dict[str, Any] = {
+            "enabled": False,
+            "running": False,
+            "health": "disabled",
+            "failed_orgs": 0,
+            "org_count": 0,
+        }
+    else:
+        scheduler_snapshot = scheduler.status()
+        tick_failures = scheduler_snapshot.get("last_tick_failures") or []
+        if not scheduler_snapshot.get("enabled"):
+            health = "disabled"
+        elif not scheduler_snapshot.get("running"):
+            health = "stopped"
+        elif tick_failures:
+            health = "degraded"
+        else:
+            health = "healthy"
+        scheduler_snapshot["health"] = health
+        scheduler_snapshot["failed_orgs"] = len(tick_failures)
+        scheduler_snapshot["org_count"] = len(scheduler_snapshot.get("org_ids", []))
     return {
         "service": settings.service_name,
         "uptime_seconds": uptime_seconds,
@@ -192,6 +215,7 @@ async def get_metrics(request: Request) -> dict[str, Any]:
             if getattr(request.app.state, "rate_limiter", None) is not None
             else {"enabled": False}
         ),
+        "scheduler": scheduler_snapshot,
     }
 
 
@@ -213,6 +237,7 @@ async def root() -> dict[str, Any]:
             "traces": "/api/v1/traces",
             "observability": "/api/v1/observability",
             "observability_dashboard_ui": "/api/v1/observability/dashboard/ui",
+            "observability_risk_insights": "/api/v1/observability/insights/risk",
             "observability_operations_status": "/api/v1/observability/operations/status",
             "metrics": "/metrics",
             "health_live": "/health/live",

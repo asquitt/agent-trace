@@ -168,6 +168,43 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     assert batch_resp.json()["policy_evaluation"] is not None
     assert batch_resp.json()["policy_evaluation"]["breached_policies"] >= 1
 
+    duplicate_client_event_id = str(uuid4())
+    duplicate_batch_resp = client.post(
+        "/api/v1/observability/actions/batch",
+        params={"evaluate_policies": "false"},
+        json={
+            "session_id": session_id,
+            "events": [
+                {
+                    "client_event_id": duplicate_client_event_id,
+                    "action_type": "tool_call",
+                    "action_name": "duplicate-check",
+                    "resource": "https://api.example.com/duplicate",
+                    "occurred_at": to_ts,
+                    "input_tokens": 5,
+                    "output_tokens": 5,
+                    "estimated_cost_usd": 0.0001,
+                    "metadata": {},
+                },
+                {
+                    "client_event_id": duplicate_client_event_id,
+                    "action_type": "tool_call",
+                    "action_name": "duplicate-check",
+                    "resource": "https://api.example.com/duplicate",
+                    "occurred_at": to_ts,
+                    "input_tokens": 5,
+                    "output_tokens": 5,
+                    "estimated_cost_usd": 0.0001,
+                    "metadata": {},
+                },
+            ],
+        },
+    )
+    assert duplicate_batch_resp.status_code == 202
+    assert duplicate_batch_resp.json()["accepted"] == 1
+    assert duplicate_batch_resp.json()["rejected"] == 1
+    assert any("duplicate client_event_id" in err for err in duplicate_batch_resp.json()["errors"])
+
     policy_eval_resp = client.post(
         "/api/v1/observability/policies/evaluate",
         json={"org_id": org_id, "execute_actions": False},
@@ -214,6 +251,11 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     active_resp = client.get("/api/v1/observability/sessions/active", params={"org_id": org_id})
     assert active_resp.status_code == 200
     assert len(active_resp.json()["sessions"]) >= 1
+    first_active_session = active_resp.json()["sessions"][0]
+    assert "latest_action_at" in first_active_session
+    assert "latest_action_type" in first_active_session
+    assert "latest_action_name" in first_active_session
+    assert "latest_action_resource" in first_active_session
 
     costs_resp = client.get(
         "/api/v1/observability/costs/summary",
@@ -221,6 +263,24 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     )
     assert costs_resp.status_code == 200
     assert costs_resp.json()["totals"]["action_count"] >= 1
+    assert "cost_per_hour_usd" in costs_resp.json()["totals"]
+    assert "projected_daily_cost_usd" in costs_resp.json()["totals"]
+    assert "avg_cost_per_action_usd" in costs_resp.json()["totals"]
+    if costs_resp.json()["budgets"]:
+        first_budget = costs_resp.json()["budgets"][0]
+        assert "remaining_budget_usd" in first_budget
+        assert "burn_rate_usd_per_hour" in first_budget
+        assert "projected_exhaustion_at" in first_budget
+
+    risk_resp = client.get(
+        "/api/v1/observability/insights/risk",
+        params={"org_id": org_id, "from": from_ts, "to": to_ts},
+    )
+    assert risk_resp.status_code == 200
+    assert "current" in risk_resp.json()
+    assert "previous" in risk_resp.json()
+    assert "delta" in risk_resp.json()
+    assert "signals" in risk_resp.json()
 
     memory_resp = client.get(
         "/api/v1/observability/memory/consistency",
@@ -264,6 +324,7 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     ops_status_resp = client.get("/api/v1/observability/operations/status")
     assert ops_status_resp.status_code == 200
     assert "scheduler" in ops_status_resp.json()
+    assert "health" in ops_status_resp.json()["scheduler"]
 
     runs_resp = client.get(
         "/api/v1/observability/operations/runs",
@@ -275,6 +336,11 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     run_detail_resp = client.get(f"/api/v1/observability/operations/runs/{ops_run_id}")
     assert run_detail_resp.status_code == 200
     assert run_detail_resp.json()["id"] == ops_run_id
+
+    metrics_resp = client.get("/metrics")
+    assert metrics_resp.status_code == 200
+    assert "scheduler" in metrics_resp.json()
+    assert "health" in metrics_resp.json()["scheduler"]
 
     siem_export_resp = client.post(
         "/api/v1/observability/exports/siem",
@@ -295,3 +361,5 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     ui_resp = client.get("/api/v1/observability/dashboard/ui")
     assert ui_resp.status_code == 200
     assert "AI Trace Runtime Console" in ui_resp.text
+    assert "Active Session Feed" in ui_resp.text
+    assert "Risk Signals (Window over Window)" in ui_resp.text

@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import case, desc, func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...dependencies import AuthDep, SettingsDep, StorageDep
 from ...models.observability import (
@@ -74,10 +75,6 @@ def _to_db_datetime(value: Optional[datetime]) -> Optional[datetime]:
     return to_naive_utc(value)
 
 
-def _utcnow_naive() -> datetime:
-    return utc_now_naive()
-
-
 def _normalize_bucket(dt: datetime, granularity: str) -> datetime:
     if granularity == "1m":
         return dt.replace(second=0, microsecond=0)
@@ -86,6 +83,63 @@ def _normalize_bucket(dt: datetime, granularity: str) -> datetime:
     # 5m default
     minute = (dt.minute // 5) * 5
     return dt.replace(minute=minute, second=0, microsecond=0)
+
+
+async def _action_window_metrics(
+    session: AsyncSession,
+    *,
+    org_id: str,
+    from_time: datetime,
+    to_time: datetime,
+    deployment_id: Optional[UUID] = None,
+    agent_id: Optional[str] = None,
+) -> dict[str, Any]:
+    filters = [
+        AgentAction.occurred_at >= from_time,
+        AgentAction.occurred_at <= to_time,
+        AgentDeployment.org_id == org_id,
+    ]
+    if deployment_id:
+        filters.append(AgentSession.deployment_id == deployment_id)
+    if agent_id:
+        filters.append(AgentSession.agent_id == agent_id)
+
+    totals_q = (
+        select(
+            func.count(AgentAction.id),
+            func.sum(case((AgentAction.success.is_(False), 1), else_=0)),
+            func.sum(AgentAction.estimated_cost_usd),
+            func.sum(AgentAction.input_tokens),
+            func.sum(AgentAction.output_tokens),
+        )
+        .join(AgentSession, AgentAction.session_id == AgentSession.id)
+        .join(AgentDeployment, AgentSession.deployment_id == AgentDeployment.id)
+        .where(*filters)
+    )
+    row = (await session.execute(totals_q)).one()
+    action_count = int(row[0] or 0)
+    error_count = int(row[1] or 0)
+    cost_usd = float(row[2] or 0.0)
+    input_tokens = int(row[3] or 0)
+    output_tokens = int(row[4] or 0)
+    error_rate = (error_count / action_count) if action_count > 0 else 0.0
+
+    return {
+        "action_count": action_count,
+        "error_count": error_count,
+        "error_rate": error_rate,
+        "cost_usd": cost_usd,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    }
+
+
+def _pct_change(current: float, previous: float) -> Optional[float]:
+    if previous == 0.0:
+        if current == 0.0:
+            return 0.0
+        return None
+    return (current - previous) / previous
 
 
 def _require_viewer(auth: AuthContext) -> None:
@@ -189,7 +243,7 @@ async def _store_audit_event(
 ) -> None:
     async with storage.session_factory() as session:
         row = SystemAuditEvent(
-            occurred_at=_utcnow_naive(),
+            occurred_at=utc_now_naive(),
             actor_subject=auth.subject,
             actor_roles=sorted(auth.roles),
             org_id=org_id,
@@ -287,6 +341,10 @@ class ActiveSessionItem(BaseModel):
     started_at: datetime
     last_activity_at: Optional[datetime] = None
     elapsed_ms: int
+    latest_action_at: Optional[datetime] = None
+    latest_action_type: Optional[str] = None
+    latest_action_name: Optional[str] = None
+    latest_action_resource: Optional[str] = None
 
 
 class ActiveSessionListResponse(BaseModel):
@@ -595,6 +653,14 @@ class CostSummaryResponse(BaseModel):
     totals: dict[str, Any]
     by_agent: list[dict[str, Any]]
     budgets: list[dict[str, Any]]
+
+
+class RiskInsightResponse(BaseModel):
+    window: dict[str, Any]
+    current: dict[str, Any]
+    previous: dict[str, Any]
+    delta: dict[str, Any]
+    signals: list[dict[str, Any]]
 
 
 class MemoryConsistencyResponse(BaseModel):
@@ -1073,7 +1139,7 @@ async def list_active_sessions(
     _require_viewer(auth)
     _enforce_org_scope(auth, org_id)
     offset = (page - 1) * page_size
-    now = _utcnow_naive()
+    now = utc_now_naive()
 
     async with storage.session_factory() as session:
         base = (
@@ -1106,12 +1172,50 @@ async def list_active_sessions(
         has_more = len(rows) > page_size
         rows = rows[:page_size]
 
+        latest_by_session: dict[UUID, dict[str, Any]] = {}
+        session_ids = [row.id for row in rows]
+        if session_ids:
+            latest_actions_subq = (
+                select(
+                    AgentAction.session_id.label("session_id"),
+                    AgentAction.occurred_at.label("occurred_at"),
+                    AgentAction.action_type.label("action_type"),
+                    AgentAction.action_name.label("action_name"),
+                    AgentAction.resource.label("resource"),
+                    func.row_number()
+                    .over(
+                        partition_by=AgentAction.session_id,
+                        order_by=AgentAction.occurred_at.desc(),
+                    )
+                    .label("rn"),
+                )
+                .where(AgentAction.session_id.in_(session_ids))
+                .subquery()
+            )
+            latest_result = await session.execute(
+                select(
+                    latest_actions_subq.c.session_id,
+                    latest_actions_subq.c.occurred_at,
+                    latest_actions_subq.c.action_type,
+                    latest_actions_subq.c.action_name,
+                    latest_actions_subq.c.resource,
+                ).where(latest_actions_subq.c.rn == 1)
+            )
+            for action_row in latest_result.all():
+                latest_by_session[action_row[0]] = {
+                    "occurred_at": action_row[1],
+                    "action_type": action_row[2],
+                    "action_name": action_row[3],
+                    "resource": action_row[4],
+                }
+
         total_result = await session.execute(count_q)
         total = int(total_result.scalar() or 0)
 
         sessions = []
         for row in rows:
             elapsed = int((now - row.started_at).total_seconds() * 1000)
+            latest = latest_by_session.get(row.id)
             sessions.append(
                 ActiveSessionItem(
                     id=str(row.id),
@@ -1121,6 +1225,10 @@ async def list_active_sessions(
                     started_at=row.started_at,
                     last_activity_at=row.last_activity_at,
                     elapsed_ms=max(elapsed, 0),
+                    latest_action_at=latest["occurred_at"] if latest else None,
+                    latest_action_type=_enum_str(latest["action_type"]) if latest else None,
+                    latest_action_name=latest["action_name"] if latest else None,
+                    latest_action_resource=latest["resource"] if latest else None,
                 )
             )
 
@@ -1161,6 +1269,7 @@ async def ingest_action_batch(
                 )
             )
             existing_client_ids = {row[0] for row in existing_result.all() if row[0] is not None}
+        seen_client_ids = set(existing_client_ids)
 
         accepted = 0
         rejected = 0
@@ -1169,7 +1278,7 @@ async def ingest_action_batch(
         latest_event: Optional[datetime] = None
 
         for event in payload.events:
-            if event.client_event_id and event.client_event_id in existing_client_ids:
+            if event.client_event_id and event.client_event_id in seen_client_ids:
                 rejected += 1
                 errors.append(f"duplicate client_event_id {event.client_event_id}")
                 continue
@@ -1197,6 +1306,8 @@ async def ingest_action_batch(
             await session.flush()
             accepted += 1
             action_ids.append(str(row.id))
+            if event.client_event_id is not None:
+                seen_client_ids.add(event.client_event_id)
 
             occurred_at = _to_db_datetime(event.occurred_at)
             if occurred_at and (latest_event is None or occurred_at > latest_event):
@@ -1211,7 +1322,7 @@ async def ingest_action_batch(
                 policy_evaluation = await evaluate_budget_policies(
                     session,
                     deployment.org_id,
-                    as_of=latest_event or _utcnow_naive(),
+                    as_of=latest_event or utc_now_naive(),
                     execute_actions=True,
                     require_shutdown_approval=settings.observability_shutdown_requires_approval,
                     approval_max_age_minutes=settings.observability_shutdown_approval_max_age_minutes,
@@ -1517,7 +1628,7 @@ async def create_policy_approval(
 ) -> PolicyApprovalResponse:
     _require_operator(auth)
     _enforce_org_scope(auth, payload.org_id)
-    requested_at = _utcnow_naive()
+    requested_at = utc_now_naive()
     expires_at = _to_db_datetime(payload.expires_at) or (
         requested_at.replace(microsecond=0)
         + timedelta(minutes=settings.observability_shutdown_approval_max_age_minutes)
@@ -1583,7 +1694,7 @@ async def decide_policy_approval(
             detail="decision must be approved or rejected",
         )
 
-    now = _utcnow_naive()
+    now = utc_now_naive()
     async with storage.session_factory() as session:
         row = await session.get(PolicyActionApproval, approval_id)
         if row is None:
@@ -1688,7 +1799,7 @@ async def evaluate_policies(
 ) -> PolicyEvaluationResponse:
     _require_operator(auth)
     _enforce_org_scope(auth, payload.org_id)
-    started_at = _utcnow_naive()
+    started_at = utc_now_naive()
     notification_result: Optional[dict[str, Any]] = None
     async with storage.session_factory() as session:
         summary = await evaluate_budget_policies(
@@ -1712,7 +1823,7 @@ async def evaluate_policies(
         org_id=payload.org_id,
         run_type="api_policy_evaluation",
         started_at=started_at,
-        completed_at=_utcnow_naive(),
+        completed_at=utc_now_naive(),
         success=True,
         policy_summary=summary,
         notification_summary=notification_result,
@@ -1799,7 +1910,7 @@ async def update_anomaly(
     auth: AuthDep,
 ) -> AnomalyResponse:
     _require_operator(auth)
-    now = _utcnow_naive()
+    now = utc_now_naive()
     async with storage.session_factory() as session:
         row = await session.get(AnomalyEvent, anomaly_id)
         if not row:
@@ -1905,7 +2016,7 @@ async def run_detectors(
 ) -> DetectorRunResponse:
     _require_operator(auth)
     _enforce_org_scope(auth, payload.org_id)
-    started_at = _utcnow_naive()
+    started_at = utc_now_naive()
     config = DetectorConfig(
         current_window_minutes=payload.current_window_minutes,
         baseline_window_hours=payload.baseline_window_hours,
@@ -1949,7 +2060,7 @@ async def run_detectors(
         org_id=payload.org_id,
         run_type="api_detector_run",
         started_at=started_at,
-        completed_at=_utcnow_naive(),
+        completed_at=utc_now_naive(),
         success=True,
         detector_summary=detector_summary,
         policy_summary=policy_evaluation,
@@ -1995,7 +2106,7 @@ async def run_operations_cycle(
 ) -> RuntimeOperationsRunResponse:
     _require_operator(auth)
     _enforce_org_scope(auth, payload.org_id)
-    started_at = _utcnow_naive()
+    started_at = utc_now_naive()
     detector_summary: dict[str, Any] = {}
     policy_summary: dict[str, Any] = {}
 
@@ -2041,7 +2152,7 @@ async def run_operations_cycle(
         org_id=payload.org_id,
         run_type="api_operations_run",
         started_at=started_at,
-        completed_at=_utcnow_naive(),
+        completed_at=utc_now_naive(),
         success=True,
         detector_summary=detector_summary,
         policy_summary=policy_summary,
@@ -2088,10 +2199,24 @@ async def get_operations_status(request: Request, auth: AuthDep) -> RuntimeOpera
             scheduler={
                 "enabled": False,
                 "running": False,
+                "health": "disabled",
                 "reason": "scheduler_not_initialized",
             }
         )
-    return RuntimeOperationsStatusResponse(scheduler=scheduler.status())
+    scheduler_state = scheduler.status()
+    tick_failures = scheduler_state.get("last_tick_failures") or []
+    if not scheduler_state.get("enabled"):
+        health = "disabled"
+    elif not scheduler_state.get("running"):
+        health = "stopped"
+    elif tick_failures:
+        health = "degraded"
+    else:
+        health = "healthy"
+    scheduler_state["health"] = health
+    scheduler_state["failed_orgs"] = len(tick_failures)
+    scheduler_state["org_count"] = len(scheduler_state.get("org_ids", []))
+    return RuntimeOperationsStatusResponse(scheduler=scheduler_state)
 
 
 @router.get("/operations/runs", response_model=OperationRunListResponse)
@@ -2666,6 +2791,10 @@ async def get_cost_summary(
         policies = list((await session.execute(policy_q)).scalars().all())
         budgets: list[dict[str, Any]] = []
         total_cost = float(totals[0] or 0.0)
+        total_actions = int(totals[3] or 0)
+        window_seconds = max((to_time - from_time).total_seconds(), 1.0)
+        window_hours = window_seconds / 3600.0
+        cost_per_hour_usd = total_cost / window_hours
 
         for policy in policies:
             scope_cost = total_cost
@@ -2695,6 +2824,17 @@ async def get_cost_summary(
             utilization = (
                 (scope_cost / policy.max_cost_usd) if policy.max_cost_usd and policy.max_cost_usd > 0 else None
             )
+            remaining_budget_usd = (
+                max(float(policy.max_cost_usd) - scope_cost, 0.0)
+                if policy.max_cost_usd is not None
+                else None
+            )
+            burn_rate_usd_per_hour = scope_cost / window_hours
+            projected_exhaustion_at: Optional[str] = None
+            if remaining_budget_usd is not None and burn_rate_usd_per_hour > 0:
+                eta_hours = remaining_budget_usd / burn_rate_usd_per_hour
+                projected_exhaustion_at = (to_time + timedelta(hours=eta_hours)).isoformat()
+
             budgets.append(
                 {
                     "policy_id": str(policy.id),
@@ -2704,6 +2844,9 @@ async def get_cost_summary(
                     "max_cost_usd": policy.max_cost_usd,
                     "current_cost_usd": scope_cost,
                     "utilization": utilization,
+                    "remaining_budget_usd": remaining_budget_usd,
+                    "burn_rate_usd_per_hour": burn_rate_usd_per_hour,
+                    "projected_exhaustion_at": projected_exhaustion_at,
                     "action_on_breach": _enum_str(policy.action_on_breach),
                 }
             )
@@ -2713,7 +2856,11 @@ async def get_cost_summary(
                 "cost_usd": float(totals[0] or 0.0),
                 "input_tokens": int(totals[1] or 0),
                 "output_tokens": int(totals[2] or 0),
-                "action_count": int(totals[3] or 0),
+                "action_count": total_actions,
+                "window_hours": window_hours,
+                "cost_per_hour_usd": cost_per_hour_usd,
+                "projected_daily_cost_usd": cost_per_hour_usd * 24.0,
+                "avg_cost_per_action_usd": (total_cost / total_actions) if total_actions > 0 else 0.0,
             },
             by_agent=[
                 {
@@ -2727,6 +2874,108 @@ async def get_cost_summary(
             ],
             budgets=budgets,
         )
+
+
+@router.get("/insights/risk", response_model=RiskInsightResponse)
+async def get_risk_insights(
+    storage: StorageDep,
+    auth: AuthDep,
+    org_id: str = Query(...),
+    from_time: datetime = Query(..., alias="from"),
+    to_time: datetime = Query(..., alias="to"),
+    deployment_id: Optional[UUID] = Query(None),
+    agent_id: Optional[str] = Query(None),
+) -> RiskInsightResponse:
+    _require_viewer(auth)
+    _enforce_org_scope(auth, org_id)
+    from_time = _to_db_datetime(from_time)
+    to_time = _to_db_datetime(to_time)
+    if to_time <= from_time:
+        raise HTTPException(status_code=400, detail="to must be greater than from")
+
+    window = to_time - from_time
+    previous_to = from_time
+    previous_from = from_time - window
+
+    async with storage.session_factory() as session:
+        current = await _action_window_metrics(
+            session,
+            org_id=org_id,
+            from_time=from_time,
+            to_time=to_time,
+            deployment_id=deployment_id,
+            agent_id=agent_id,
+        )
+        previous = await _action_window_metrics(
+            session,
+            org_id=org_id,
+            from_time=previous_from,
+            to_time=previous_to,
+            deployment_id=deployment_id,
+            agent_id=agent_id,
+        )
+
+    delta = {
+        "action_count": current["action_count"] - previous["action_count"],
+        "error_rate": current["error_rate"] - previous["error_rate"],
+        "cost_usd": current["cost_usd"] - previous["cost_usd"],
+        "input_tokens": current["input_tokens"] - previous["input_tokens"],
+        "output_tokens": current["output_tokens"] - previous["output_tokens"],
+        "action_count_pct": _pct_change(float(current["action_count"]), float(previous["action_count"])),
+        "error_rate_pct": _pct_change(float(current["error_rate"]), float(previous["error_rate"])),
+        "cost_usd_pct": _pct_change(float(current["cost_usd"]), float(previous["cost_usd"])),
+    }
+
+    signals: list[dict[str, Any]] = []
+    if (
+        current["action_count"] >= 10
+        and previous["action_count"] >= 10
+        and current["error_rate"] >= max(0.05, previous["error_rate"] * 1.75)
+    ):
+        signals.append(
+            {
+                "code": "error_rate_spike",
+                "severity": "high",
+                "current": current["error_rate"],
+                "baseline": previous["error_rate"],
+                "message": "Error rate is materially above the previous window baseline.",
+            }
+        )
+
+    if current["cost_usd"] >= max(1.0, previous["cost_usd"] * 1.5):
+        signals.append(
+            {
+                "code": "cost_acceleration",
+                "severity": "warning",
+                "current": current["cost_usd"],
+                "baseline": previous["cost_usd"],
+                "message": "Cost usage accelerated relative to the previous window.",
+            }
+        )
+
+    if previous["action_count"] > 0 and current["action_count"] <= previous["action_count"] * 0.25:
+        signals.append(
+            {
+                "code": "traffic_collapse",
+                "severity": "warning",
+                "current": current["action_count"],
+                "baseline": previous["action_count"],
+                "message": "Action traffic dropped sharply versus the previous window.",
+            }
+        )
+
+    return RiskInsightResponse(
+        window={
+            "from": from_time.isoformat(),
+            "to": to_time.isoformat(),
+            "previous_from": previous_from.isoformat(),
+            "previous_to": previous_to.isoformat(),
+        },
+        current=current,
+        previous=previous,
+        delta=delta,
+        signals=signals,
+    )
 
 
 @router.get("/memory/consistency", response_model=MemoryConsistencyResponse)
@@ -3103,6 +3352,17 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
 
     <div class="row">
       <div class="card">
+        <h3>Active Session Feed</h3>
+        <ul id="activeSessionFeed" class="list"></ul>
+      </div>
+      <div class="card">
+        <h3>Risk Signals (Window over Window)</h3>
+        <ul id="riskSignals" class="list"></ul>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="card">
         <h3>Top Agents</h3>
         <ul id="topAgents" class="list"></ul>
       </div>
@@ -3147,6 +3407,17 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
       return "$" + Number(v || 0).toFixed(4);
     }
 
+    function formatElapsed(ms) {
+      const total = Math.max(Number(ms || 0), 0);
+      const minutes = Math.floor(total / 60000);
+      const hours = Math.floor(minutes / 60);
+      const rem = minutes % 60;
+      if (hours > 0) {
+        return hours + "h " + rem + "m";
+      }
+      return rem + "m";
+    }
+
     async function fetchJson(url, options) {
       const res = await fetch(url, options);
       if (!res.ok) {
@@ -3172,6 +3443,25 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
       }
     }
 
+    function renderActiveSessions(items) {
+      const el = byId("activeSessionFeed");
+      el.innerHTML = "";
+      if (!items.length) {
+        el.innerHTML = '<li class="muted">No active sessions right now</li>';
+        return;
+      }
+      for (const row of items.slice(0, 10)) {
+        const li = document.createElement("li");
+        const latest = row.latest_action_name
+          ? row.latest_action_name + (row.latest_action_resource ? " (" + row.latest_action_resource + ")" : "")
+          : "No action yet";
+        li.innerHTML =
+          "<span>" + row.agent_id + " <span class='muted'>(" + latest + ")</span></span>" +
+          "<span><span class='tag'>" + formatElapsed(row.elapsed_ms) + "</span></span>";
+        el.appendChild(li);
+      }
+    }
+
     function renderAnomalies(items) {
       const el = byId("anomalyList");
       el.innerHTML = "";
@@ -3184,6 +3474,33 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
         const sevClass = row.severity === "critical" ? "critical" : (row.severity === "high" ? "warning" : "muted");
         li.innerHTML =
           "<span>" + row.title + "</span>" +
+          "<span class='" + sevClass + "'>" + row.severity + "</span>";
+        el.appendChild(li);
+      }
+    }
+
+    function renderRiskSignals(risk) {
+      const el = byId("riskSignals");
+      el.innerHTML = "";
+      const signals = (risk && risk.signals) || [];
+      if (!signals.length) {
+        const li = document.createElement("li");
+        const delta = risk && risk.delta ? risk.delta : {};
+        const actionPct = delta.action_count_pct;
+        const costPct = delta.cost_usd_pct;
+        const summary = "Actions " +
+          (actionPct == null ? "n/a" : (actionPct * 100).toFixed(1) + "%") +
+          ", Cost " +
+          (costPct == null ? "n/a" : (costPct * 100).toFixed(1) + "%");
+        li.innerHTML = "<span class='ok'>No active risk signals</span><span class='muted'>" + summary + "</span>";
+        el.appendChild(li);
+        return;
+      }
+      for (const row of signals.slice(0, 10)) {
+        const li = document.createElement("li");
+        const sevClass = row.severity === "high" ? "critical" : "warning";
+        li.innerHTML =
+          "<span>" + row.code + "</span>" +
           "<span class='" + sevClass + "'>" + row.severity + "</span>";
         el.appendChild(li);
       }
@@ -3214,19 +3531,29 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
       }
       const [fromTs, toTs] = nowWindow(24);
       const params = new URLSearchParams({ org_id: orgId, from: fromTs, to: toTs, granularity: "5m" });
-      const fleet = await fetchJson("/api/v1/observability/dashboard/fleet?" + params.toString());
-      const anomalies = await fetchJson("/api/v1/observability/anomalies?" + new URLSearchParams({
-        org_id: orgId, from: fromTs, to: toTs
-      }).toString());
-      const costs = await fetchJson("/api/v1/observability/costs/summary?" + new URLSearchParams({
-        org_id: orgId, from: fromTs, to: toTs
-      }).toString());
+      const [fleet, anomalies, costs, active, risk] = await Promise.all([
+        fetchJson("/api/v1/observability/dashboard/fleet?" + params.toString()),
+        fetchJson("/api/v1/observability/anomalies?" + new URLSearchParams({
+          org_id: orgId, from: fromTs, to: toTs
+        }).toString()),
+        fetchJson("/api/v1/observability/costs/summary?" + new URLSearchParams({
+          org_id: orgId, from: fromTs, to: toTs
+        }).toString()),
+        fetchJson("/api/v1/observability/sessions/active?" + new URLSearchParams({
+          org_id: orgId, page: "1", page_size: "20"
+        }).toString()),
+        fetchJson("/api/v1/observability/insights/risk?" + new URLSearchParams({
+          org_id: orgId, from: fromTs, to: toTs
+        }).toString())
+      ]);
 
       byId("activeSessions").textContent = fleet.totals.active_sessions;
       byId("actionCount").textContent = fleet.totals.action_count;
       byId("errorRate").textContent = formatRate(fleet.totals.error_rate);
       byId("totalCost").textContent = formatUsd(fleet.totals.total_cost_usd);
 
+      renderActiveSessions(active.sessions || []);
+      renderRiskSignals(risk || {});
       renderTopAgents(fleet.top_agents || []);
       renderAnomalies(anomalies.anomalies || []);
       renderBudgets(costs.budgets || []);

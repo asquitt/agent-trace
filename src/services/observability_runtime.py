@@ -53,12 +53,6 @@ def ensure_naive_utc(value: Optional[datetime]) -> Optional[datetime]:
     """Normalize datetimes for DB columns stored without timezone."""
     return to_naive_utc(value)
 
-
-def utcnow_naive() -> datetime:
-    """Current UTC timestamp compatible with TIMESTAMP WITHOUT TIME ZONE."""
-    return utc_now_naive()
-
-
 @dataclass(frozen=True)
 class DetectorConfig:
     """Tuning values for anomaly detectors."""
@@ -315,7 +309,7 @@ async def evaluate_budget_policies(
     approval_max_age_minutes: int = 60,
 ) -> dict[str, Any]:
     """Evaluate budget policies and execute configured controls."""
-    now = ensure_naive_utc(as_of) or utcnow_naive()
+    now = ensure_naive_utc(as_of) or utc_now_naive()
     policies_query = select(BudgetPolicy).where(
         BudgetPolicy.org_id == org_id,
         BudgetPolicy.status == PolicyStatus.ACTIVE.value,
@@ -1050,7 +1044,7 @@ async def run_anomaly_detectors(
 ) -> dict[str, Any]:
     """Run all built-in anomaly detectors and persist findings."""
     run_config = config or DetectorConfig()
-    now = ensure_naive_utc(as_of) or utcnow_naive()
+    now = ensure_naive_utc(as_of) or utc_now_naive()
     current_start = now - timedelta(minutes=run_config.current_window_minutes)
     baseline_start = current_start - timedelta(hours=run_config.baseline_window_hours)
 
