@@ -1,5 +1,6 @@
 """Tests for the core tracing module."""
 
+from dataclasses import FrozenInstanceError
 from uuid import uuid4
 
 import pytest
@@ -138,5 +139,5 @@ class TestTraceContextImmutability:
         """Test that context cannot be modified."""
         ctx = TraceContext(trace_id=uuid4(), correlation_id=uuid4())
 
-        with pytest.raises(Exception):  # FrozenInstanceError
+        with pytest.raises(FrozenInstanceError):
             ctx.idea_id = 123  # type: ignore

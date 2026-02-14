@@ -138,7 +138,7 @@ def show_trace(
             uuid = UUID(trace_id)
         except ValueError:
             console.print(f"[red]Invalid UUID: {trace_id}[/]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
 
         trace = await storage.get_trace(uuid)
         if not trace:
@@ -239,7 +239,7 @@ def show_reasoning(
             uuid = UUID(trace_id)
         except ValueError:
             console.print(f"[red]Invalid UUID: {trace_id}[/]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
 
         trace = await storage.get_trace(uuid)
         if not trace:
@@ -289,7 +289,7 @@ def export_trace(
             uuid = UUID(trace_id)
         except ValueError:
             console.print(f"[red]Invalid UUID: {trace_id}[/]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
 
         trace = await storage.get_trace(uuid)
         if not trace:
