@@ -1,170 +1,216 @@
 # AI Trace
 
-Agent observability platform for tracing, monitoring, and governing autonomous agent fleets.
+Production-focused agent observability and runtime governance platform.
 
-## Current Status (Feb 14, 2026)
+AI Trace provides end-to-end traceability for autonomous agent systems and adds operational controls for cost, safety, and reliability across deployments.
 
-AI Trace scope for Wealth Play #2 is now implemented as an MVP runtime control plane.
+## What You Get
 
-| Area | Status |
-|---|---|
-| Trace/span/reasoning capture | COMPLETE |
-| API + CLI trace exploration | COMPLETE |
-| Per-trace token/cost tracking | COMPLETE |
-| Fleet/deployment dashboards | COMPLETE (API + built-in web UI) |
-| Session management visualization | COMPLETE |
-| Anomaly detection (10x spikes, unusual access, divergence, loops) | COMPLETE |
-| Memory consistency monitoring | COMPLETE |
-| Budget alerts + auto-shutdown policies | COMPLETE |
-| Multi-agent delegation chain tracing | COMPLETE |
-| Continuous ops loop + run audit logs | COMPLETE |
+- Trace, span, and reasoning-chain capture
+- Fleet and session observability across deployments
+- Runtime anomaly detection (API spikes, cost spikes, unusual resource access, memory divergence, delegation loops)
+- Budget policy engine with runtime controls (`alert`, `throttle`, `require_approval`, `shutdown`)
+- Multi-agent delegation chain tracing
+- Continuous control loops (scheduler), notifications, and run audit logs
+- Tenant-scoped API auth, RBAC, and shutdown approval workflow
 
-## Delivered Platform Capabilities
+## Release Status
 
-- Deployment, session, action, delegation, memory, anomaly, and policy schemas with migrations
-- Fleet dashboard metrics API with timeseries, top agents, and top resources
-- Session lifecycle tracking and active session inventory
-- Multi-agent chain tracing (`Agent A -> Agent B -> ...`) via delegation graph endpoint
-- Rule-based detector runtime:
-  - API call spike detector
-  - Cost spike detector
-  - Unusual resource access detector
-  - Memory divergence detector
-  - Delegation loop detector
-- Runtime policy engine with auto control actions:
-  - `alert`
-  - `throttle`
-  - `require_approval`
-  - `shutdown`
-- Policy conflict guardrail: higher-severity actions win (`shutdown > require_approval > throttle > alert`)
-- Policy event logging and on-demand policy evaluation
-- Optional background scheduler for continuous detectors/policy loops across configured orgs
-- Optional outbound webhook notifications for detector/policy events
-- Persistent operation run logs for manual and scheduled control-loop runs
-- Built-in dashboard page at `/api/v1/observability/dashboard/ui` with live refresh
+**Current version:** `0.2.0`  
+**Maturity:** Beta  
+**Validation snapshot:** `19 passed, 1 skipped` (unit + integration in local environment)
 
-## Quick Start
+## Core Capabilities
 
-```bash
-# Install
-pip install -e .
+### 1) Runtime Visibility
 
-# Start local infra
-cd docker && docker compose up -d
+- Deployments, sessions, actions, delegations, memory snapshots
+- Fleet metrics, top agents/resources, cost/token summaries
+- Active session inventory and session lifecycle tracking
 
-# Run migrations
-alembic upgrade head
+### 2) Detection + Governance
 
-# Start API
-uvicorn src.api.main:app --reload
+- Rule-based detectors for behavioral/runtime anomalies
+- Budget policies with automatic enforcement actions
+- Policy conflict priority handling:
+  - `shutdown > require_approval > throttle > alert`
 
-# Trace CLI
-ai-trace list
-ai-trace show <trace_id>
-```
+### 3) Safety Controls
 
-Open:
-- API docs: `http://127.0.0.1:8000/docs`
-- Runtime dashboard UI: `http://127.0.0.1:8000/api/v1/observability/dashboard/ui`
+- Optional requirement for explicit approval before shutdown actions execute
+- Approval API workflow:
+  - create approval request
+  - approve/reject decision
+  - list and audit approval records
 
-## API Endpoints
+### 4) Operations Plane
 
-Trace APIs:
-- `GET /api/v1/traces`
-- `GET /api/v1/traces/{id}`
-- `GET /api/v1/traces/{id}/reasoning`
-- `GET /api/v1/traces/idea/{idea_id}/history`
-- `GET /api/v1/traces/export/{id}/json`
+- Manual control-loop execution endpoints
+- Background scheduler for periodic detectors/policies
+- Outbound webhook notifications with retry/backoff
+- Persistent operation-run logs for manual and scheduled loops
 
-Observability APIs:
-- `POST /api/v1/observability/deployments`
-- `GET /api/v1/observability/deployments`
-- `POST /api/v1/observability/sessions`
-- `PATCH /api/v1/observability/sessions/{session_id}`
-- `GET /api/v1/observability/sessions/active`
-- `POST /api/v1/observability/actions/batch`
-- `POST /api/v1/observability/delegations`
-- `POST /api/v1/observability/memory/snapshots/batch`
-- `POST /api/v1/observability/budget-policies`
-- `GET /api/v1/observability/budget-policies`
-- `GET /api/v1/observability/budget-policies/events`
-- `POST /api/v1/observability/policies/evaluate`
-- `POST /api/v1/observability/anomalies`
-- `PATCH /api/v1/observability/anomalies/{anomaly_id}`
-- `GET /api/v1/observability/anomalies`
-- `POST /api/v1/observability/detectors/run`
-- `POST /api/v1/observability/operations/run`
-- `GET /api/v1/observability/operations/status`
-- `GET /api/v1/observability/operations/runs`
-- `GET /api/v1/observability/operations/runs/{run_id}`
-- `GET /api/v1/observability/dashboard/fleet`
-- `GET /api/v1/observability/costs/summary`
-- `GET /api/v1/observability/memory/consistency`
-- `GET /api/v1/observability/chains/{trace_id}`
-- `GET /api/v1/observability/dashboard/ui`
+### 5) Security and Isolation
 
-## Validation Snapshot
-
-- Full unit/integration suite: `15 passed, 1 skipped`
-- Live integration verification with Docker Postgres:
-  - `tests/integration/test_observability_api.py` passes end-to-end
-  - Policy shutdown enforcement, policy event logging, and operation-run log APIs validated
-
-## Competitive Positioning Snapshot (Feb 14, 2026)
-
-What market leaders now cover well:
-- Trace + session observability
-- Token/cost analytics
-- Alerting and dashboards
-
-Where AI Trace currently differentiates:
-- Runtime policy actioning (`throttle`/`require_approval`/`shutdown`)
-- Memory divergence monitoring integrated into the same governance loop
-- Multi-agent delegation chain observability tied to policy/budget controls
-
-Primary references:
-- Datadog LLM Observability: [https://docs.datadoghq.com/llm_observability/](https://docs.datadoghq.com/llm_observability/)
-- Langfuse sessions/cost/alerts/agent graphs: [https://langfuse.com/docs/observability/features/sessions](https://langfuse.com/docs/observability/features/sessions)
-- LangSmith observability: [https://docs.langchain.com/langsmith/observability-quickstart](https://docs.langchain.com/langsmith/observability-quickstart)
-- OpenTelemetry GenAI conventions: [https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/](https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/)
-
-## Scheduler + Notifications
-
-Set these env vars to enable continuous runtime operations:
-
-```bash
-OBSERVABILITY_SCHEDULER_ENABLED=true
-OBSERVABILITY_SCHEDULER_ORG_IDS=acme,contoso
-OBSERVABILITY_SCHEDULER_INTERVAL_SECONDS=60
-OBSERVABILITY_NOTIFICATION_WEBHOOKS=https://hooks.example.com/ops
-```
-
-Optional controls:
-- `OBSERVABILITY_SCHEDULER_RUN_DETECTORS`
-- `OBSERVABILITY_SCHEDULER_RUN_POLICIES`
-- `OBSERVABILITY_SCHEDULER_EXECUTE_POLICY_ACTIONS`
-- `OBSERVABILITY_SCHEDULER_ENABLE_NOTIFICATIONS`
-- `OBSERVABILITY_NOTIFICATION_MAX_ATTEMPTS`
-- `OBSERVABILITY_NOTIFICATION_RETRY_BACKOFF_SECONDS`
+- API key authentication (optional, configurable)
+- RBAC roles: `viewer`, `operator`, `admin`
+- Tenant scope enforcement by org (`X-Org-Id` + policy/org checks)
 
 ## Architecture
 
 ```text
 src/
-├── tracing/    # Tracer, context propagation, provider wrappers
-├── models/     # SQLAlchemy models (trace + observability domains)
-├── api/        # FastAPI routers/endpoints
-├── services/   # Runtime detector + policy engine services
-└── cli/        # Terminal trace viewer
+├── api/
+│   ├── main.py                 # FastAPI app, middleware, health/metrics
+│   └── routers/
+│       ├── traces.py           # Trace read/export APIs
+│       └── observability.py    # Fleet/session/runtime/policy APIs
+├── models/                     # SQLAlchemy models (trace + observability domains)
+├── services/
+│   ├── observability_runtime.py
+│   ├── operations_scheduler.py
+│   └── notifications.py
+├── tracing/                    # Tracer/context/provider wrappers + storage backend
+├── security.py                 # Auth + RBAC + tenant enforcement helpers
+└── config.py                   # Environment-backed settings
 ```
 
-## Strategy Docs
+## API Surface
 
+### Trace APIs
+
+- `GET /api/v1/traces`
+- `GET /api/v1/traces/{trace_id}`
+- `GET /api/v1/traces/{trace_id}/reasoning`
+- `GET /api/v1/traces/idea/{idea_id}/history`
+- `GET /api/v1/traces/export/{trace_id}/json`
+
+### Observability APIs
+
+- Deployments/Sessions/Actions/Delegations/Memory:
+  - `POST /api/v1/observability/deployments`
+  - `GET /api/v1/observability/deployments`
+  - `POST /api/v1/observability/sessions`
+  - `PATCH /api/v1/observability/sessions/{session_id}`
+  - `GET /api/v1/observability/sessions/active`
+  - `POST /api/v1/observability/actions/batch`
+  - `POST /api/v1/observability/delegations`
+  - `POST /api/v1/observability/memory/snapshots/batch`
+- Policies/Approvals/Detectors/Operations:
+  - `POST /api/v1/observability/budget-policies`
+  - `GET /api/v1/observability/budget-policies`
+  - `GET /api/v1/observability/budget-policies/events`
+  - `POST /api/v1/observability/policy-approvals`
+  - `POST /api/v1/observability/policy-approvals/{approval_id}/decision`
+  - `GET /api/v1/observability/policy-approvals`
+  - `POST /api/v1/observability/policies/evaluate`
+  - `POST /api/v1/observability/detectors/run`
+  - `POST /api/v1/observability/operations/run`
+  - `GET /api/v1/observability/operations/status`
+  - `GET /api/v1/observability/operations/runs`
+  - `GET /api/v1/observability/operations/runs/{run_id}`
+- Dashboards/Analytics:
+  - `GET /api/v1/observability/dashboard/fleet`
+  - `GET /api/v1/observability/costs/summary`
+  - `GET /api/v1/observability/memory/consistency`
+  - `GET /api/v1/observability/chains/{trace_id}`
+  - `GET /api/v1/observability/dashboard/ui`
+
+### Platform Health/Ops
+
+- `GET /health`
+- `GET /health/live`
+- `GET /health/ready`
+- `GET /metrics`
+- `GET /docs`
+
+## Quick Start (Local Development)
+
+```bash
+# 1) Install
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+
+# 2) Start infra
+cd docker
+docker compose up -d db redis
+cd ..
+
+# 3) Configure env
+cp .env.example .env
+
+# 4) Run migrations
+alembic upgrade head
+
+# 5) Start API
+uvicorn src.api.main:app --reload
+```
+
+Open:
+
+- API docs: `http://127.0.0.1:8000/docs`
+- Observability dashboard: `http://127.0.0.1:8000/api/v1/observability/dashboard/ui`
+
+## Configuration
+
+Use `.env` (see `.env.example`).
+
+### Security
+
+- `API_AUTH_ENABLED`
+- `API_KEY_HEADER`
+- `API_TENANT_HEADER`
+- `API_REQUIRE_TENANT_HEADER`
+- `API_KEYS` format:
+  - `token:subject:role1|role2:org1|org2`
+  - Use `*` org for global admin keys
+
+### Scheduler + Notifications
+
+- `OBSERVABILITY_SCHEDULER_ENABLED`
+- `OBSERVABILITY_SCHEDULER_ORG_IDS`
+- `OBSERVABILITY_SCHEDULER_INTERVAL_SECONDS`
+- `OBSERVABILITY_NOTIFICATION_WEBHOOKS`
+- `OBSERVABILITY_NOTIFICATION_MAX_ATTEMPTS`
+- `OBSERVABILITY_NOTIFICATION_RETRY_BACKOFF_SECONDS`
+
+### Shutdown Safety
+
+- `OBSERVABILITY_SHUTDOWN_REQUIRES_APPROVAL`
+- `OBSERVABILITY_SHUTDOWN_APPROVAL_MAX_AGE_MINUTES`
+
+## Production Deployment Checklist
+
+1. Enable auth and tenant headers.
+2. Provision managed Postgres and Redis.
+3. Run migrations (`alembic upgrade head`) during deploy.
+4. Configure scheduler org list and notification webhooks.
+5. Enable readiness/liveness checks in orchestrator.
+6. Configure alerting on:
+   - `/health/ready != 200`
+   - operation-run failures
+   - notification delivery failures
+7. Rotate API keys and store secrets in a vault/KMS.
+
+## Quality Gates
+
+```bash
+ruff check src tests
+pyright
+pytest -q -p pytest_cov -p pytest_asyncio
+```
+
+GitHub Actions CI is included in:
+
+- `.github/workflows/ci.yml`
+
+## Notable Documents
+
+- `docs/phase1-observability-foundation-plan.md`
 - `/Users/demarioasquitt/Desktop/Projects/Entrepreneurial/explore/ai-trace-observability-platform-analysis.md`
 - `/Users/demarioasquitt/Desktop/Projects/Entrepreneurial/explore/playbook-status.md`
 - `/Users/demarioasquitt/Desktop/Projects/Entrepreneurial/STRATEGIC_ROADMAP.md`
-- `/Users/demarioasquitt/Desktop/Projects/Entrepreneurial/PROJECTS.md`
-- `/Users/demarioasquitt/Desktop/Projects/Entrepreneurial/traceability/docs/phase1-observability-foundation-plan.md`
 
 ## License
 

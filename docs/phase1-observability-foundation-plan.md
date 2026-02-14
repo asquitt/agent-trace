@@ -1,9 +1,9 @@
-# AI Trace Phase 1 Foundation Plan + Phase 2 Runtime Control Addendum
+# AI Trace Phase 1 Foundation Plan + Phase 2 Runtime Control + Phase 3 Production Hardening Addendum
 
 **Document date:** February 14, 2026  
 **Execution window:** February 17, 2026 to February 28, 2026  
 **Scope:** Build the production foundation for fleet/session/delegation observability before dashboard UI polish.
-**Implementation status:** Phase 1 + Phase 2 completed on February 14, 2026 (accelerated delivery)
+**Implementation status:** Phase 1 + Phase 2 + Phase 3 production hardening completed on February 14, 2026 (accelerated delivery)
 
 ## Implementation Log (Completed)
 
@@ -12,6 +12,7 @@
   - `alembic/versions/003_observability_core_tables.py`
   - `alembic/versions/004_trace_dimension_linking.py`
   - `alembic/versions/005_observability_operation_runs.py`
+  - `alembic/versions/006_policy_action_approvals.py`
 - Added observability ORM domain model:
   - `src/models/observability.py`
 - Linked observability dimensions into tracing model + tracer context:
@@ -26,7 +27,7 @@
 - Validation completed:
   - Migration replay in isolated virtualenv: `upgrade head -> downgrade 001 -> upgrade head` succeeded
   - Endpoint smoke checks succeeded for deployment/session/action/delegation/anomaly/dashboard/cost/memory/anomaly-list/chains paths
-  - Automated tests pass: `15 passed, 1 skipped` (`tests/integration/test_observability_api.py`, `tests/unit/test_tracing.py`, `tests/unit/test_observability_runtime.py`, `tests/unit/test_notifications.py`)
+  - Automated tests pass: `19 passed, 1 skipped` (`tests/integration/test_observability_api.py`, `tests/unit/test_tracing.py`, `tests/unit/test_observability_runtime.py`, `tests/unit/test_notifications.py`, `tests/unit/test_security.py`)
 
 ## Phase 2 Runtime Control Addendum (Completed)
 
@@ -69,13 +70,42 @@
 
 ### Validation evidence
 
-- Full test suite: `15 passed, 1 skipped`
+- Full test suite: `19 passed, 1 skipped`
 - Live Postgres integration run: `tests/integration/test_observability_api.py` passed against isolated temporary Postgres with fresh `alembic upgrade head`
 - Verified:
   - budget breach evaluation
   - policy event recording
   - detector execution endpoint
   - dashboard UI endpoint
+
+## Phase 3 Production Hardening Addendum (Completed)
+
+### Delivered hardening capabilities
+
+- Added migration `alembic/versions/006_policy_action_approvals.py` and approval model:
+  - `policy_action_approvals` table
+  - approval status enum (`pending`, `approved`, `rejected`, `expired`)
+- Added API authentication + tenant/RBAC controls:
+  - `src/security.py`
+  - API key auth and org-scope enforcement integrated in trace and observability routers
+- Added shutdown safety approvals:
+  - shutdown action execution now supports approval requirement gate
+  - approval management endpoints:
+    - `POST /api/v1/observability/policy-approvals`
+    - `POST /api/v1/observability/policy-approvals/{approval_id}/decision`
+    - `GET /api/v1/observability/policy-approvals`
+- Added production operations primitives:
+  - request-id and response-time headers middleware
+  - liveness/readiness endpoints (`/health/live`, `/health/ready`)
+  - JSON metrics endpoint (`/metrics`)
+- Added CI pipeline:
+  - `.github/workflows/ci.yml` (lint, type-check, migration, tests)
+
+### Validation evidence
+
+- Fresh migration chain verified to head `006` on isolated Postgres container
+- Integration test `tests/integration/test_observability_api.py` passes against migrated DB
+- Full local suite: `19 passed, 1 skipped`
 
 ## 1. Goal
 
