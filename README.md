@@ -20,7 +20,7 @@ AI Trace provides end-to-end traceability for autonomous agent systems and adds 
 
 **Current version:** `0.2.0`  
 **Maturity:** Beta  
-**Validation snapshot (February 14, 2026):** `26 passed` (full unit + integration on fresh migrated Postgres)
+**Validation snapshot (February 14, 2026):** `33 passed` (full unit + integration on fresh migrated Postgres)
 
 ## Core Capabilities
 
@@ -207,7 +207,7 @@ Use `.env` (see `.env.example`).
 ## Quality Gates
 
 ```bash
-ruff check src tests
+ruff check --select F src tests
 pyright
 pytest -q -p pytest_cov -p pytest_asyncio
 ```
@@ -226,6 +226,12 @@ GitHub Actions CI is included in:
 
 ## Recent Hardening (February 14, 2026)
 
+- Consolidated duplicate timestamp normalization logic into shared helpers (`src/utils/time.py`) and wired API/service/storage paths to it.
+- Removed duplicate UTC conversion implementations across routers, runtime service, scheduler, and storage backend to prevent drift.
+- Stabilized strict type-checking in CI with high-signal diagnostics and fixed concrete type/runtime defects in active API/runtime paths.
+- Added unit coverage for shared time helpers and scheduler lifecycle:
+  - `tests/unit/test_time_utils.py`
+  - `tests/unit/test_operations_scheduler.py`
 - Wired `GET /api/v1/traces/metrics/summary` into storage-backed aggregate metrics.
 - Normalized trace/span timestamp writes to naive UTC in PostgreSQL storage to avoid timezone write failures.
 - Normalized trace metrics `from/to` query timestamps to naive UTC before DB filtering.

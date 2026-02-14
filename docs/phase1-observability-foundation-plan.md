@@ -3,7 +3,7 @@
 **Document date:** February 14, 2026  
 **Execution window:** February 17, 2026 to February 28, 2026  
 **Scope:** Build the production foundation for fleet/session/delegation observability before dashboard UI polish.
-**Implementation status:** Phase 1 + Phase 2 + Phase 3 production hardening + deep trace API/storage integration cleanup completed on February 14, 2026 (accelerated delivery)
+**Implementation status:** Phase 1 + Phase 2 + Phase 3 production hardening + deep trace API/storage integration cleanup + strict CI type-gate stabilization completed on February 14, 2026 (accelerated delivery)
 
 ## Implementation Log (Completed)
 
@@ -28,7 +28,7 @@
 - Validation completed:
   - Migration replay in isolated virtualenv: `upgrade head -> downgrade 001 -> upgrade head` succeeded
   - Endpoint smoke checks succeeded for deployment/session/action/delegation/anomaly/dashboard/cost/memory/anomaly-list/chains paths
-  - Automated tests pass: `26 passed` (`tests/integration/test_observability_api.py`, `tests/integration/test_traces_api.py`, `tests/unit/test_tracing.py`, `tests/unit/test_tracing_decorators.py`, `tests/unit/test_observability_runtime.py`, `tests/unit/test_notifications.py`, `tests/unit/test_security.py`, `tests/unit/test_rate_limit.py`)
+  - Automated tests pass: `33 passed` (`tests/integration/test_observability_api.py`, `tests/integration/test_traces_api.py`, `tests/unit/test_tracing.py`, `tests/unit/test_tracing_decorators.py`, `tests/unit/test_observability_runtime.py`, `tests/unit/test_notifications.py`, `tests/unit/test_security.py`, `tests/unit/test_rate_limit.py`, `tests/unit/test_time_utils.py`, `tests/unit/test_operations_scheduler.py`)
   - Trace API/storage cleanup shipped:
     - `GET /api/v1/traces/metrics/summary` implemented with storage-backed aggregates
     - trace/span timestamp normalization to naive UTC in storage layer
@@ -41,6 +41,8 @@
     - CI Postgres service image aligned to `pgvector/pgvector:pg16`
     - CI now verifies migration replay (`downgrade 001 -> upgrade head`)
     - repeatable local e2e runner added: `scripts/run_full_e2e.sh`
+    - shared UTC normalization utility added and wired across API/service/storage (`src/utils/time.py`)
+    - strict pyright CI gate now green (`0 errors`) with high-signal diagnostics
 
 ## Phase 2 Runtime Control Addendum (Completed)
 
@@ -83,7 +85,7 @@
 
 ### Validation evidence
 
-- Full test suite: `26 passed`
+- Full test suite: `33 passed`
 - Live Postgres integration run: `tests/integration/test_observability_api.py` passed against isolated temporary Postgres with fresh `alembic upgrade head`
 - Verified:
   - budget breach evaluation
@@ -122,7 +124,7 @@
 
 - Fresh migration chain verified to head `006` on isolated Postgres container
 - Integration test `tests/integration/test_observability_api.py` passes against migrated DB
-- Full local suite: `26 passed`
+- Full local suite: `33 passed`
 
 ## 1. Goal
 
