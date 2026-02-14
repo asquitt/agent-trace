@@ -97,6 +97,47 @@ def _anomaly_group_fingerprint(anomaly: AnomalyEvent) -> str:
     return f"{anomaly_type}:{deployment_scope}:{title_scope}"
 
 
+def _parse_anomaly_group_fingerprint(fingerprint: str) -> tuple[AnomalyType, UUID | None, str]:
+    parts = [part.strip() for part in fingerprint.split(":", 2)]
+    if len(parts) != 3:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid anomaly fingerprint format",
+        )
+    anomaly_type_token, deployment_token, title_scope = parts
+    try:
+        anomaly_type = AnomalyType(anomaly_type_token)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid anomaly type in fingerprint",
+        ) from exc
+    if not title_scope:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Fingerprint title scope cannot be empty",
+        )
+    if deployment_token == "none":
+        deployment_id = None
+    else:
+        try:
+            deployment_id = UUID(deployment_token)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid deployment scope in fingerprint",
+            ) from exc
+    return anomaly_type, deployment_id, title_scope
+
+
+def _default_group_update_match_statuses(target_status: AnomalyStatus) -> list[AnomalyStatus]:
+    if target_status == AnomalyStatus.OPEN:
+        return [AnomalyStatus.ACKNOWLEDGED]
+    if target_status == AnomalyStatus.ACKNOWLEDGED:
+        return [AnomalyStatus.OPEN]
+    return [AnomalyStatus.OPEN, AnomalyStatus.ACKNOWLEDGED]
+
+
 class _AnomalyGroupAccumulator(TypedDict):
     fingerprint: str
     anomaly_type: str
@@ -762,6 +803,23 @@ class AnomalyGroupListResponse(BaseModel):
     page: int
     page_size: int
     has_more: bool
+
+
+class AnomalyGroupStatusUpdateRequest(BaseModel):
+    org_id: str
+    fingerprint: str
+    status: AnomalyStatus
+    note: Optional[str] = None
+    updated_by: Optional[str] = None
+    match_statuses: list[AnomalyStatus] = Field(default_factory=list)
+
+
+class AnomalyGroupStatusUpdateResponse(BaseModel):
+    fingerprint: str
+    status: str
+    matched_count: int
+    updated_count: int
+    updated_anomaly_ids: list[str] = Field(default_factory=list)
 
 
 class FleetWindow(BaseModel):
@@ -2212,6 +2270,65 @@ async def update_anomaly(
         await session.commit()
         await session.refresh(row)
         return _anomaly_response(row)
+
+
+@router.post("/anomalies/groups/status", response_model=AnomalyGroupStatusUpdateResponse)
+async def update_anomaly_group_status(
+    payload: AnomalyGroupStatusUpdateRequest,
+    storage: StorageDep,
+    auth: AuthDep,
+) -> AnomalyGroupStatusUpdateResponse:
+    _require_operator(auth)
+    _enforce_org_scope(auth, payload.org_id)
+    anomaly_type, deployment_id, title_scope = _parse_anomaly_group_fingerprint(payload.fingerprint)
+    now = utc_now_naive()
+
+    status_filters = payload.match_statuses or _default_group_update_match_statuses(payload.status)
+    filters: list[Any] = [
+        AgentDeployment.org_id == payload.org_id,
+        AnomalyEvent.anomaly_type == anomaly_type.value,
+        func.lower(func.trim(AnomalyEvent.title)) == title_scope,
+    ]
+    if deployment_id is None:
+        filters.append(AnomalyEvent.deployment_id.is_(None))
+    else:
+        filters.append(AnomalyEvent.deployment_id == deployment_id)
+    if status_filters:
+        filters.append(AnomalyEvent.status.in_([item.value for item in status_filters]))
+
+    async with storage.session_factory() as session:
+        query = (
+            select(AnomalyEvent)
+            .join(AgentDeployment, AnomalyEvent.deployment_id == AgentDeployment.id)
+            .where(*filters)
+            .order_by(desc(AnomalyEvent.detected_at))
+        )
+        rows = list((await session.execute(query)).scalars().all())
+        matched_count = len(rows)
+        updated_ids: list[str] = []
+        for row in rows:
+            if _enum_str(row.status) == payload.status.value:
+                continue
+            row.status = payload.status
+            row.note = payload.note
+            row.updated_by = payload.updated_by
+            if payload.status == AnomalyStatus.ACKNOWLEDGED and row.acknowledged_at is None:
+                row.acknowledged_at = now
+            if payload.status == AnomalyStatus.RESOLVED:
+                if row.acknowledged_at is None:
+                    row.acknowledged_at = now
+                row.resolved_at = now
+            updated_ids.append(str(row.id))
+        if updated_ids:
+            await session.commit()
+
+    return AnomalyGroupStatusUpdateResponse(
+        fingerprint=payload.fingerprint,
+        status=payload.status.value,
+        matched_count=matched_count,
+        updated_count=len(updated_ids),
+        updated_anomaly_ids=updated_ids,
+    )
 
 
 @router.get("/anomalies", response_model=AnomalyListResponse)
@@ -3668,6 +3785,12 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
       color: var(--ink);
       border-color: var(--border);
     }
+    button.tiny {
+      padding: 4px 8px;
+      font-size: 11px;
+      border-radius: 8px;
+      margin-left: 6px;
+    }
     .grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -3853,6 +3976,25 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
       return res.json();
     }
 
+    async function updateAnomalyGroupStatus(fingerprint, targetStatus) {
+      const orgId = byId("orgId").value.trim();
+      if (!orgId) {
+        return;
+      }
+      await fetchJson("/api/v1/observability/anomalies/groups/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          org_id: orgId,
+          fingerprint,
+          status: targetStatus,
+          updated_by: "dashboard-ui",
+          note: "Updated from dashboard UI group action"
+        }),
+      });
+      await refresh();
+    }
+
     function renderTopAgents(items) {
       const el = byId("topAgents");
       el.innerHTML = "";
@@ -3902,9 +4044,34 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
             ? "critical"
             : (row.representative_severity === "high" ? "warning" : "muted");
         const volume = row.total_occurrences || row.anomaly_count;
-        li.innerHTML =
-          "<span>" + row.title + "</span>" +
-          "<span class='" + sevClass + "'>" + row.representative_severity + " · " + volume + "x</span>";
+        li.innerHTML = "";
+        const left = document.createElement("span");
+        left.textContent = row.title;
+        const right = document.createElement("span");
+        right.className = sevClass;
+        right.textContent = row.representative_severity + " · " + volume + "x";
+        if ((row.open_count || 0) > 0) {
+          const ack = document.createElement("button");
+          ack.className = "secondary tiny";
+          ack.textContent = "Acknowledge";
+          ack.addEventListener("click", (event) => {
+            event.preventDefault();
+            updateAnomalyGroupStatus(row.fingerprint, "acknowledged").catch((e) => alert(e.message));
+          });
+          right.appendChild(ack);
+        }
+        if ((row.open_count || 0) > 0 || (row.acknowledged_count || 0) > 0) {
+          const resolve = document.createElement("button");
+          resolve.className = "secondary tiny";
+          resolve.textContent = "Resolve";
+          resolve.addEventListener("click", (event) => {
+            event.preventDefault();
+            updateAnomalyGroupStatus(row.fingerprint, "resolved").catch((e) => alert(e.message));
+          });
+          right.appendChild(resolve);
+        }
+        li.appendChild(left);
+        li.appendChild(right);
         el.appendChild(li);
       }
     }

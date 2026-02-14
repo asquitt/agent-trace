@@ -28,7 +28,7 @@
 - Validation completed:
   - Migration replay in isolated virtualenv: `upgrade head -> downgrade 001 -> upgrade head` succeeded
   - Endpoint smoke checks succeeded for deployment/session/action/delegation/anomaly/dashboard/cost/memory/anomaly-list/chains paths
-  - Automated tests pass: `56 passed` (`tests/integration/test_observability_api.py`, `tests/integration/test_traces_api.py`, `tests/unit/test_cli_production_preflight.py`, `tests/unit/test_tracing.py`, `tests/unit/test_tracing_decorators.py`, `tests/unit/test_observability_runtime.py`, `tests/unit/test_notifications.py`, `tests/unit/test_security.py`, `tests/unit/test_rate_limit.py`, `tests/unit/test_time_utils.py`, `tests/unit/test_operations_scheduler.py`, `tests/unit/test_production_preflight.py`)
+  - Automated tests pass: `60 passed` (`tests/integration/test_observability_api.py`, `tests/integration/test_traces_api.py`, `tests/unit/test_cli_production_preflight.py`, `tests/unit/test_observability_router_helpers.py`, `tests/unit/test_tracing.py`, `tests/unit/test_tracing_decorators.py`, `tests/unit/test_observability_runtime.py`, `tests/unit/test_notifications.py`, `tests/unit/test_security.py`, `tests/unit/test_rate_limit.py`, `tests/unit/test_time_utils.py`, `tests/unit/test_operations_scheduler.py`, `tests/unit/test_production_preflight.py`)
   - Trace API/storage cleanup shipped:
     - `GET /api/v1/traces/metrics/summary` implemented with storage-backed aggregates
     - trace/span timestamp normalization to naive UTC in storage layer
@@ -69,11 +69,12 @@
     - actionable-only notification gating shipped (`OBSERVABILITY_NOTIFICATION_ONLY_ON_ACTIONABLE`) to suppress empty detector/policy runs
     - severity-threshold notification gating shipped (`OBSERVABILITY_NOTIFICATION_MIN_SEVERITY`) to prevent low-signal runtime alerts
     - grouped anomaly backlog endpoint shipped (`GET /api/v1/observability/anomalies/groups`) with status counts and occurrence rollups
+    - grouped anomaly triage update endpoint shipped (`POST /api/v1/observability/anomalies/groups/status`) so operators can acknowledge/resolve grouped incidents in bulk
     - runtime notification gating and target-merge logic centralized in shared notification service helpers to remove router/scheduler drift risk
     - in-memory rate limiter hardened with stale-key pruning plus max-key eviction guardrails (`API_RATE_LIMIT_MAX_KEYS`) to prevent idle and high-cardinality memory growth under long-running API processes
     - deployment preflight checks added (`ai-trace-preflight`, `scripts/production_preflight.py`, `python -m src.cli.production_preflight`) with optional container startup enforcement (`PREFLIGHT_ON_START`, `PREFLIGHT_STRICT`)
     - integration coverage extended for repeated detector runs (`created_anomalies` then `deduplicated_anomalies`) on delegation-loop anomalies
-    - full e2e runner re-validated after changes (`56 passed`, migration replay pass, second test pass)
+    - full e2e runner re-validated after changes (`60 passed`, migration replay pass, second test pass)
 
 ## Phase 2 Runtime Control Addendum (Completed)
 
@@ -116,7 +117,7 @@
 
 ### Validation evidence
 
-- Full test suite: `56 passed`
+- Full test suite: `60 passed`
 - Live Postgres integration run: `tests/integration/test_observability_api.py` passed against isolated temporary Postgres with fresh `alembic upgrade head`
 - Verified:
   - budget breach evaluation
@@ -162,7 +163,7 @@
 
 - Fresh migration chain verified to head `006` on isolated Postgres container
 - Integration test `tests/integration/test_observability_api.py` passes against migrated DB
-- Full local suite: `56 passed`
+- Full local suite: `60 passed`
 
 ## 1. Goal
 
@@ -252,6 +253,7 @@ All endpoints use prefix: `/api/v1/observability`
 | `GET` | `/chains/{trace_id}` | Multi-agent delegation graph for a trace |
 | `GET` | `/anomalies` | Query anomaly backlog |
 | `GET` | `/anomalies/groups` | Query grouped anomaly backlog with occurrence rollups |
+| `POST` | `/anomalies/groups/status` | Bulk acknowledge/resolve anomaly groups by fingerprint |
 
 ### 4.3 Detailed Contracts
 

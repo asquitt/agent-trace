@@ -10,6 +10,7 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime controls:
 
 - Fleet/session visibility across deployments
 - Real-time anomaly detection with deduplication and grouped triage
+- Bulk grouped anomaly triage actions (acknowledge/resolve by fingerprint)
 - Budget policy enforcement with runtime actions (`alert`, `throttle`, `require_approval`, `shutdown`)
 - Memory consistency monitoring across distributed sessions
 - Multi-agent delegation chain tracing
@@ -24,8 +25,8 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime controls:
 - Validation snapshot:
   - `ruff check --select F src tests scripts` passed
   - `pyright` passed (`0 errors`)
-  - `pytest -q` passed (`54 passed, 2 skipped`) in lightweight local mode
-  - `./scripts/run_full_e2e.sh` passed (`56 passed`, migration replay, double test pass)
+  - `pytest -q` passed (`58 passed, 2 skipped`) in lightweight local mode
+  - `./scripts/run_full_e2e.sh` passed (`60 passed`, migration replay, double test pass)
 
 ## Core Capabilities
 
@@ -160,6 +161,7 @@ Container startup guard rails:
 - `PATCH /api/v1/observability/anomalies/{anomaly_id}`
 - `GET /api/v1/observability/anomalies`
 - `GET /api/v1/observability/anomalies/groups`
+- `POST /api/v1/observability/anomalies/groups/status`
 - `POST /api/v1/observability/detectors/run`
 - `POST /api/v1/observability/operations/run`
 - `GET /api/v1/observability/operations/status`

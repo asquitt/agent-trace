@@ -346,6 +346,47 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     assert first_group["total_occurrences"] >= first_group["anomaly_count"]
     assert first_group["fingerprint"]
 
+    group_ack_resp = client.post(
+        "/api/v1/observability/anomalies/groups/status",
+        json={
+            "org_id": org_id,
+            "fingerprint": first_group["fingerprint"],
+            "status": "acknowledged",
+            "updated_by": "integration-test",
+            "note": "ack from integration test",
+        },
+    )
+    assert group_ack_resp.status_code == 200
+    assert group_ack_resp.json()["updated_count"] >= 1
+
+    acknowledged_groups_resp = client.get(
+        "/api/v1/observability/anomalies/groups",
+        params={
+            "org_id": org_id,
+            "status": "acknowledged",
+            "from": from_ts,
+            "to": to_ts,
+        },
+    )
+    assert acknowledged_groups_resp.status_code == 200
+    assert any(
+        group["fingerprint"] == first_group["fingerprint"]
+        for group in acknowledged_groups_resp.json()["groups"]
+    )
+
+    group_resolve_resp = client.post(
+        "/api/v1/observability/anomalies/groups/status",
+        json={
+            "org_id": org_id,
+            "fingerprint": first_group["fingerprint"],
+            "status": "resolved",
+            "updated_by": "integration-test",
+            "note": "resolved from integration test",
+        },
+    )
+    assert group_resolve_resp.status_code == 200
+    assert group_resolve_resp.json()["updated_count"] >= 1
+
     scoped_anomalies_resp = client.get(
         "/api/v1/observability/anomalies",
         params={
