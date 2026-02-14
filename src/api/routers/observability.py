@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Any, Optional, overload
+from typing import Any, Optional, TypedDict, overload
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
@@ -50,7 +50,10 @@ from ...services.notifications import (
     collect_policy_notification_target_strings,
     normalize_pagerduty_routing_keys,
     normalize_slack_webhook_targets,
+    runtime_event_severity,
     send_runtime_notifications,
+    severity_rank,
+    skipped_notification_result,
 )
 from ...utils.time import to_naive_utc, utc_now_iso, utc_now_naive
 
@@ -63,6 +66,53 @@ def _to_iso(dt: Optional[datetime]) -> Optional[str]:
 
 def _enum_str(value: Any) -> str:
     return value.value if hasattr(value, "value") else str(value)
+
+
+_ANOMALY_SEVERITY_RANK = {
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+    "critical": 4,
+}
+
+
+def _anomaly_severity_rank(severity: str) -> int:
+    return _ANOMALY_SEVERITY_RANK.get(str(severity).strip().lower(), 1)
+
+
+def _parse_stats_datetime(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return to_naive_utc(value)
+    if not isinstance(value, str):
+        return None
+    try:
+        return to_naive_utc(datetime.fromisoformat(value))
+    except ValueError:
+        return None
+
+
+def _anomaly_group_fingerprint(anomaly: AnomalyEvent) -> str:
+    anomaly_type = _enum_str(anomaly.anomaly_type).strip().lower()
+    deployment_scope = str(anomaly.deployment_id) if anomaly.deployment_id else "none"
+    title_scope = anomaly.title.strip().lower()
+    return f"{anomaly_type}:{deployment_scope}:{title_scope}"
+
+
+class _AnomalyGroupAccumulator(TypedDict):
+    fingerprint: str
+    anomaly_type: str
+    title: str
+    deployment_id: Optional[str]
+    representative_anomaly_id: str
+    representative_severity: str
+    latest_detector_name: Optional[str]
+    first_detected_at: datetime
+    last_detected_at: datetime
+    anomaly_count: int
+    total_occurrences: int
+    open_count: int
+    acknowledged_count: int
+    resolved_count: int
 
 
 @overload
@@ -174,31 +224,6 @@ async def _dispatch_runtime_notifications(
     policy_summary: Optional[dict[str, Any]] = None,
     extra_targets: Optional[list[str]] = None,
 ) -> dict[str, Any]:
-    created_anomalies = int((detector_summary or {}).get("created_anomalies", 0) or 0)
-    breached_policies = int((policy_summary or {}).get("breached_policies", 0) or 0)
-    if (
-        settings.observability_notification_only_on_actionable
-        and created_anomalies == 0
-        and breached_policies == 0
-    ):
-        return {
-            "attempted": 0,
-            "succeeded": 0,
-            "failed": 0,
-            "errors": [],
-            "max_attempts": max(settings.observability_notification_max_attempts, 1),
-            "channels": {
-                "webhook": {"attempted": 0, "succeeded": 0, "failed": 0},
-                "slack": {"attempted": 0, "succeeded": 0, "failed": 0},
-                "pagerduty": {"attempted": 0, "succeeded": 0, "failed": 0},
-            },
-            "skipped": True,
-            "skip_reason": "no_actionable_findings",
-        }
-
-    raw_targets = list(settings.observability_notification_webhooks)
-    raw_targets.extend(collect_policy_notification_target_strings(policy_summary or {}))
-    raw_targets.extend(extra_targets or [])
     payload = {
         "event_type": "observability_runtime_event",
         "org_id": org_id,
@@ -206,7 +231,33 @@ async def _dispatch_runtime_notifications(
         "policy_summary": policy_summary or {},
         "occurred_at": utc_now_iso(),
     }
-    return await send_runtime_notifications(
+    created_anomalies = int((detector_summary or {}).get("created_anomalies", 0) or 0)
+    breached_policies = int((policy_summary or {}).get("breached_policies", 0) or 0)
+    event_severity = runtime_event_severity(payload)
+    min_severity = settings.observability_notification_min_severity
+    if (
+        settings.observability_notification_only_on_actionable
+        and created_anomalies == 0
+        and breached_policies == 0
+    ):
+        return skipped_notification_result(
+            max_attempts=settings.observability_notification_max_attempts,
+            reason="no_actionable_findings",
+            event_severity=event_severity,
+            min_severity=min_severity,
+        )
+    if severity_rank(event_severity) < severity_rank(min_severity):
+        return skipped_notification_result(
+            max_attempts=settings.observability_notification_max_attempts,
+            reason="below_min_severity",
+            event_severity=event_severity,
+            min_severity=min_severity,
+        )
+
+    raw_targets = list(settings.observability_notification_webhooks)
+    raw_targets.extend(collect_policy_notification_target_strings(policy_summary or {}))
+    raw_targets.extend(extra_targets or [])
+    result = await send_runtime_notifications(
         raw_targets,
         payload,
         slack_webhooks=normalize_slack_webhook_targets(
@@ -219,6 +270,9 @@ async def _dispatch_runtime_notifications(
         max_attempts=settings.observability_notification_max_attempts,
         retry_backoff_seconds=settings.observability_notification_retry_backoff_seconds,
     )
+    result["event_severity"] = event_severity
+    result["min_severity"] = min_severity
+    return result
 
 
 async def _store_operation_run(
@@ -662,6 +716,31 @@ class AnomalyResponse(BaseModel):
 
 class AnomalyListResponse(BaseModel):
     anomalies: list[AnomalyResponse]
+    total: int
+    page: int
+    page_size: int
+    has_more: bool
+
+
+class AnomalyGroupItem(BaseModel):
+    fingerprint: str
+    anomaly_type: str
+    title: str
+    deployment_id: Optional[str] = None
+    representative_anomaly_id: str
+    representative_severity: str
+    latest_detector_name: Optional[str] = None
+    first_detected_at: datetime
+    last_detected_at: datetime
+    anomaly_count: int
+    total_occurrences: int
+    open_count: int
+    acknowledged_count: int
+    resolved_count: int
+
+
+class AnomalyGroupListResponse(BaseModel):
+    groups: list[AnomalyGroupItem]
     total: int
     page: int
     page_size: int
@@ -2184,6 +2263,128 @@ async def list_anomalies(
         )
 
 
+@router.get("/anomalies/groups", response_model=AnomalyGroupListResponse)
+async def list_anomaly_groups(
+    storage: StorageDep,
+    auth: AuthDep,
+    org_id: str = Query(...),
+    status: Optional[AnomalyStatus] = Query(None),
+    severity: Optional[AnomalySeverity] = Query(None),
+    anomaly_type: Optional[AnomalyType] = Query(None),
+    from_time: datetime = Query(..., alias="from"),
+    to_time: datetime = Query(..., alias="to"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=200),
+) -> AnomalyGroupListResponse:
+    _require_viewer(auth)
+    _enforce_org_scope(auth, org_id)
+    from_time = _to_db_datetime(from_time)
+    to_time = _to_db_datetime(to_time)
+
+    async with storage.session_factory() as session:
+        query = (
+            select(AnomalyEvent)
+            .join(AgentDeployment, AnomalyEvent.deployment_id == AgentDeployment.id)
+            .where(
+                AnomalyEvent.detected_at >= from_time,
+                AnomalyEvent.detected_at <= to_time,
+                AgentDeployment.org_id == org_id,
+            )
+            .order_by(desc(AnomalyEvent.detected_at))
+        )
+        if status:
+            query = query.where(AnomalyEvent.status == status.value)
+        if severity:
+            query = query.where(AnomalyEvent.severity == severity.value)
+        if anomaly_type:
+            query = query.where(AnomalyEvent.anomaly_type == anomaly_type.value)
+
+        result = await session.execute(query)
+        rows = list(result.scalars().all())
+
+    grouped: dict[str, _AnomalyGroupAccumulator] = {}
+    for row in rows:
+        fingerprint = _anomaly_group_fingerprint(row)
+        metadata = row.anomaly_metadata if isinstance(row.anomaly_metadata, dict) else {}
+        raw_stats = metadata.get("detection_stats")
+        detection_stats = raw_stats if isinstance(raw_stats, dict) else {}
+        occurrences = int(detection_stats.get("occurrences") or 1)
+        occurrences = max(occurrences, 1)
+        first_detected_at = _parse_stats_datetime(detection_stats.get("first_detected_at")) or row.detected_at
+        last_detected_at = _parse_stats_datetime(detection_stats.get("last_detected_at")) or row.detected_at
+
+        row_severity = _enum_str(row.severity)
+        highest_severity = str(detection_stats.get("highest_severity") or row_severity)
+        normalized_highest_severity = highest_severity.strip().lower()
+        if _anomaly_severity_rank(normalized_highest_severity) < _anomaly_severity_rank(row_severity):
+            normalized_highest_severity = row_severity
+        latest_detector_name = str(detection_stats.get("last_detector_name") or row.detector_name)
+
+        group: Optional[_AnomalyGroupAccumulator] = grouped.get(fingerprint)
+        if group is None:
+            group = _AnomalyGroupAccumulator(
+                fingerprint=fingerprint,
+                anomaly_type=_enum_str(row.anomaly_type),
+                title=row.title,
+                deployment_id=str(row.deployment_id) if row.deployment_id else None,
+                representative_anomaly_id=str(row.id),
+                representative_severity=normalized_highest_severity,
+                latest_detector_name=latest_detector_name,
+                first_detected_at=first_detected_at,
+                last_detected_at=last_detected_at,
+                anomaly_count=0,
+                total_occurrences=0,
+                open_count=0,
+                acknowledged_count=0,
+                resolved_count=0,
+            )
+            grouped[fingerprint] = group
+        else:
+            if first_detected_at < group["first_detected_at"]:
+                group["first_detected_at"] = first_detected_at
+            if last_detected_at > group["last_detected_at"]:
+                group["last_detected_at"] = last_detected_at
+                group["representative_anomaly_id"] = str(row.id)
+                group["latest_detector_name"] = latest_detector_name
+            if _anomaly_severity_rank(normalized_highest_severity) > _anomaly_severity_rank(
+                group["representative_severity"]
+            ):
+                group["representative_severity"] = normalized_highest_severity
+
+        group["anomaly_count"] += 1
+        group["total_occurrences"] += occurrences
+
+        status_value = _enum_str(row.status)
+        if status_value == AnomalyStatus.OPEN.value:
+            group["open_count"] += 1
+        elif status_value == AnomalyStatus.ACKNOWLEDGED.value:
+            group["acknowledged_count"] += 1
+        elif status_value == AnomalyStatus.RESOLVED.value:
+            group["resolved_count"] += 1
+
+    sorted_groups = sorted(
+        grouped.values(),
+        key=lambda item: (
+            item["last_detected_at"],
+            item["anomaly_count"],
+            item["total_occurrences"],
+        ),
+        reverse=True,
+    )
+    total = len(sorted_groups)
+    offset = (page - 1) * page_size
+    page_groups = sorted_groups[offset : offset + page_size]
+    has_more = (offset + page_size) < total
+
+    return AnomalyGroupListResponse(
+        groups=[AnomalyGroupItem(**group) for group in page_groups],
+        total=total,
+        page=page,
+        page_size=page_size,
+        has_more=has_more,
+    )
+
+
 @router.post("/detectors/run", response_model=DetectorRunResponse)
 async def run_detectors(
     payload: DetectorRunRequest,
@@ -3583,8 +3784,8 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
         <ul id="topAgents" class="list"></ul>
       </div>
       <div class="card">
-        <h3>Anomalies (Last 24h)</h3>
-        <ul id="anomalyList" class="list"></ul>
+        <h3>Anomaly Groups (Last 24h)</h3>
+        <ul id="anomalyGroupList" class="list"></ul>
       </div>
     </div>
 
@@ -3678,8 +3879,8 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
       }
     }
 
-    function renderAnomalies(items) {
-      const el = byId("anomalyList");
+    function renderAnomalyGroups(items) {
+      const el = byId("anomalyGroupList");
       el.innerHTML = "";
       if (!items.length) {
         el.innerHTML = '<li class="ok">No anomalies in selected window</li>';
@@ -3687,10 +3888,14 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
       }
       for (const row of items.slice(0, 10)) {
         const li = document.createElement("li");
-        const sevClass = row.severity === "critical" ? "critical" : (row.severity === "high" ? "warning" : "muted");
+        const sevClass =
+          row.representative_severity === "critical"
+            ? "critical"
+            : (row.representative_severity === "high" ? "warning" : "muted");
+        const volume = row.total_occurrences || row.anomaly_count;
         li.innerHTML =
           "<span>" + row.title + "</span>" +
-          "<span class='" + sevClass + "'>" + row.severity + "</span>";
+          "<span class='" + sevClass + "'>" + row.representative_severity + " · " + volume + "x</span>";
         el.appendChild(li);
       }
     }
@@ -3747,9 +3952,9 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
       }
       const [fromTs, toTs] = nowWindow(24);
       const params = new URLSearchParams({ org_id: orgId, from: fromTs, to: toTs, granularity: "5m" });
-      const [fleet, anomalies, costs, active, risk] = await Promise.all([
+      const [fleet, anomalyGroups, costs, active, risk] = await Promise.all([
         fetchJson("/api/v1/observability/dashboard/fleet?" + params.toString()),
-        fetchJson("/api/v1/observability/anomalies?" + new URLSearchParams({
+        fetchJson("/api/v1/observability/anomalies/groups?" + new URLSearchParams({
           org_id: orgId, from: fromTs, to: toTs
         }).toString()),
         fetchJson("/api/v1/observability/costs/summary?" + new URLSearchParams({
@@ -3771,7 +3976,7 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
       renderActiveSessions(active.sessions || []);
       renderRiskSignals(risk || {});
       renderTopAgents(fleet.top_agents || []);
-      renderAnomalies(anomalies.anomalies || []);
+      renderAnomalyGroups(anomalyGroups.groups || []);
       renderBudgets(costs.budgets || []);
       byId("detectorResult").textContent = JSON.stringify(latestDetectorResult, null, 2);
     }

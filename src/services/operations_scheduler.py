@@ -15,7 +15,10 @@ from .notifications import (
     collect_policy_notification_target_strings,
     normalize_pagerduty_routing_keys,
     normalize_slack_webhook_targets,
+    runtime_event_severity,
     send_runtime_notifications,
+    severity_rank,
+    skipped_notification_result,
 )
 from .observability_runtime import (
     DetectorConfig,
@@ -197,35 +200,36 @@ class ObservabilityOperationsScheduler:
             if self._settings.observability_scheduler_enable_notifications:
                 created_anomalies = int(detector_summary.get("created_anomalies", 0) or 0)
                 breached_policies = int(policy_summary.get("breached_policies", 0) or 0)
+                notification_payload = {
+                    "event_type": "observability_scheduler_run",
+                    "org_id": org_id,
+                    "run_started_at": run_started,
+                    "detector_summary": detector_summary,
+                    "policy_summary": policy_summary,
+                }
+                event_severity = runtime_event_severity(notification_payload)
+                min_severity = self._settings.observability_notification_min_severity
                 if (
                     self._settings.observability_notification_only_on_actionable
                     and created_anomalies == 0
                     and breached_policies == 0
                 ):
-                    notification_result = {
-                        "attempted": 0,
-                        "succeeded": 0,
-                        "failed": 0,
-                        "errors": [],
-                        "max_attempts": max(self._settings.observability_notification_max_attempts, 1),
-                        "channels": {
-                            "webhook": {"attempted": 0, "succeeded": 0, "failed": 0},
-                            "slack": {"attempted": 0, "succeeded": 0, "failed": 0},
-                            "pagerduty": {"attempted": 0, "succeeded": 0, "failed": 0},
-                        },
-                        "skipped": True,
-                        "skip_reason": "no_actionable_findings",
-                    }
+                    notification_result = skipped_notification_result(
+                        max_attempts=self._settings.observability_notification_max_attempts,
+                        reason="no_actionable_findings",
+                        event_severity=event_severity,
+                        min_severity=min_severity,
+                    )
+                elif severity_rank(event_severity) < severity_rank(min_severity):
+                    notification_result = skipped_notification_result(
+                        max_attempts=self._settings.observability_notification_max_attempts,
+                        reason="below_min_severity",
+                        event_severity=event_severity,
+                        min_severity=min_severity,
+                    )
                 else:
                     targets = list(self._settings.observability_notification_webhooks)
                     targets.extend(collect_policy_notification_target_strings(policy_summary))
-                    notification_payload = {
-                        "event_type": "observability_scheduler_run",
-                        "org_id": org_id,
-                        "run_started_at": run_started,
-                        "detector_summary": detector_summary,
-                        "policy_summary": policy_summary,
-                    }
                     notification_result = await send_runtime_notifications(
                         targets,
                         notification_payload,
@@ -241,6 +245,8 @@ class ObservabilityOperationsScheduler:
                             self._settings.observability_notification_retry_backoff_seconds
                         ),
                     )
+                    notification_result["event_severity"] = event_severity
+                    notification_result["min_severity"] = min_severity
             await self._finish_run_row(
                 run_id,
                 org_id=org_id,

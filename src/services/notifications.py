@@ -11,6 +11,44 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 PAGERDUTY_EVENTS_V2_URL = "https://events.pagerduty.com/v2/enqueue"
+_SEVERITY_RANK = {
+    "info": 1,
+    "warning": 2,
+    "error": 3,
+    "critical": 4,
+}
+
+
+def base_notification_result(max_attempts: int) -> dict[str, Any]:
+    """Build a normalized empty result payload for notification dispatches."""
+    return {
+        "attempted": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "errors": [],
+        "max_attempts": max(max_attempts, 1),
+        "channels": {
+            "webhook": {"attempted": 0, "succeeded": 0, "failed": 0},
+            "slack": {"attempted": 0, "succeeded": 0, "failed": 0},
+            "pagerduty": {"attempted": 0, "succeeded": 0, "failed": 0},
+        },
+    }
+
+
+def skipped_notification_result(
+    *,
+    max_attempts: int,
+    reason: str,
+    event_severity: str,
+    min_severity: str,
+) -> dict[str, Any]:
+    """Build a normalized skipped-dispatch notification result payload."""
+    payload = base_notification_result(max_attempts)
+    payload["skipped"] = True
+    payload["skip_reason"] = reason
+    payload["event_severity"] = event_severity
+    payload["min_severity"] = min_severity
+    return payload
 
 
 @dataclass(frozen=True)
@@ -126,7 +164,13 @@ def _runtime_summary_text(payload: dict[str, Any]) -> str:
     )
 
 
-def _pagerduty_severity(payload: dict[str, Any]) -> str:
+def severity_rank(severity: str) -> int:
+    """Normalize and rank runtime severities for alert-gating decisions."""
+    return _SEVERITY_RANK.get(str(severity).strip().lower(), 1)
+
+
+def runtime_event_severity(payload: dict[str, Any]) -> str:
+    """Compute severity for a runtime event from detector and policy summaries."""
     policy_summary = payload.get("policy_summary") or {}
     detector_summary = payload.get("detector_summary") or {}
 
@@ -176,7 +220,7 @@ def _pagerduty_payload(payload: dict[str, Any], routing_key: str) -> dict[str, A
         "payload": {
             "summary": _runtime_summary_text(payload),
             "source": "ai-trace",
-            "severity": _pagerduty_severity(payload),
+            "severity": runtime_event_severity(payload),
             "custom_details": payload,
         },
     }
@@ -229,18 +273,7 @@ async def send_runtime_notifications(
     )
 
     if not webhook_targets and not slack_targets and not pagerduty_keys:
-        return {
-            "attempted": 0,
-            "succeeded": 0,
-            "failed": 0,
-            "errors": [],
-            "max_attempts": max(max_attempts, 1),
-            "channels": {
-                "webhook": {"attempted": 0, "succeeded": 0, "failed": 0},
-                "slack": {"attempted": 0, "succeeded": 0, "failed": 0},
-                "pagerduty": {"attempted": 0, "succeeded": 0, "failed": 0},
-            },
-        }
+        return base_notification_result(max_attempts)
 
     attempted = 0
     succeeded = 0

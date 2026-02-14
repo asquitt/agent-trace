@@ -335,6 +335,17 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     assert anomalies_resp.status_code == 200
     assert len(anomalies_resp.json()["anomalies"]) >= 1
 
+    anomaly_groups_resp = client.get(
+        "/api/v1/observability/anomalies/groups",
+        params={"org_id": org_id, "from": from_ts, "to": to_ts},
+    )
+    assert anomaly_groups_resp.status_code == 200
+    assert anomaly_groups_resp.json()["total"] >= 1
+    first_group = anomaly_groups_resp.json()["groups"][0]
+    assert first_group["anomaly_count"] >= 1
+    assert first_group["total_occurrences"] >= first_group["anomaly_count"]
+    assert first_group["fingerprint"]
+
     detector_resp = client.post(
         "/api/v1/observability/detectors/run",
         json={

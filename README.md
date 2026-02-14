@@ -17,6 +17,8 @@ AI Trace extends classic LLM tracing into a control plane:
 - Operations scheduler with persistent run/audit logs
 - SIEM export and operational notifications (webhook, Slack, PagerDuty)
 - Actionable-only notification gating to suppress no-op detector runs
+- Severity-threshold notification gating to suppress low-signal runtime events
+- Grouped anomaly views with occurrence rollups for faster triage
 
 ## Release Status
 
@@ -26,8 +28,8 @@ AI Trace extends classic LLM tracing into a control plane:
 - Validation evidence:
   - `ruff check --select F src tests` passed
   - `pyright` passed (`0 errors`)
-  - `pytest -q` passed (`37 passed, 2 skipped`) in lightweight local run
-  - `./scripts/run_full_e2e.sh` passed (`39 passed`, fresh DB, migration replay, double test pass)
+  - `pytest -q` passed (`42 passed, 2 skipped`) in lightweight local run
+  - `./scripts/run_full_e2e.sh` passed (`44 passed`, fresh DB, migration replay, double test pass)
 
 ## Architecture
 
@@ -79,6 +81,10 @@ src/
   - `GET /api/v1/observability/policy-approvals`
   - `POST /api/v1/observability/policies/evaluate`
   - `POST /api/v1/observability/policies/simulate`
+  - `POST /api/v1/observability/anomalies`
+  - `PATCH /api/v1/observability/anomalies/{anomaly_id}`
+  - `GET /api/v1/observability/anomalies`
+  - `GET /api/v1/observability/anomalies/groups`
   - `POST /api/v1/observability/detectors/run`
   - `POST /api/v1/observability/operations/run`
   - `GET /api/v1/observability/operations/status`
@@ -167,6 +173,7 @@ Configure via `.env` (see `.env.example`).
 - `OBSERVABILITY_NOTIFICATION_WEBHOOKS`
 - `OBSERVABILITY_NOTIFICATION_SLACK_WEBHOOKS`
 - `OBSERVABILITY_NOTIFICATION_PAGERDUTY_ROUTING_KEYS`
+- `OBSERVABILITY_NOTIFICATION_MIN_SEVERITY`
 - `OBSERVABILITY_NOTIFICATION_ONLY_ON_ACTIONABLE`
 - `OBSERVABILITY_NOTIFICATION_TIMEOUT_SECONDS`
 - `OBSERVABILITY_NOTIFICATION_MAX_ATTEMPTS`

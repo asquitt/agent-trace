@@ -7,11 +7,15 @@ import pytest
 from src.services import notifications as notifications_service
 from src.services.notifications import (
     PAGERDUTY_EVENTS_V2_URL,
+    base_notification_result,
     classify_notification_targets,
     collect_policy_notification_target_strings,
     collect_policy_notification_targets,
     normalize_webhook_targets,
+    runtime_event_severity,
     send_runtime_notifications,
+    severity_rank,
+    skipped_notification_result,
 )
 
 
@@ -99,6 +103,55 @@ def test_classify_notification_targets_splits_channels() -> None:
         "https://hooks.slack.com/services/T111/B111/BBB",
     ]
     assert target_set.pagerduty_routing_keys == ["pd-routing-key"]
+
+
+def test_runtime_event_severity_prefers_policy_shutdown() -> None:
+    severity = runtime_event_severity(
+        {
+            "policy_summary": {
+                "breached_policies": 1,
+                "results": [{"action_result": {"action": "shutdown"}}],
+            },
+            "detector_summary": {"created_anomalies": 0},
+        }
+    )
+    assert severity == "critical"
+
+
+def test_runtime_event_severity_uses_detector_volume() -> None:
+    severity = runtime_event_severity(
+        {
+            "policy_summary": {"breached_policies": 0, "results": []},
+            "detector_summary": {"created_anomalies": 2},
+        }
+    )
+    assert severity == "warning"
+
+
+def test_severity_rank_orders_levels() -> None:
+    assert severity_rank("info") < severity_rank("warning")
+    assert severity_rank("warning") < severity_rank("error")
+    assert severity_rank("error") < severity_rank("critical")
+
+
+def test_base_notification_result_defaults() -> None:
+    result = base_notification_result(0)
+    assert result["attempted"] == 0
+    assert result["max_attempts"] == 1
+    assert result["channels"]["webhook"]["attempted"] == 0
+
+
+def test_skipped_notification_result_includes_skip_metadata() -> None:
+    result = skipped_notification_result(
+        max_attempts=3,
+        reason="below_min_severity",
+        event_severity="info",
+        min_severity="warning",
+    )
+    assert result["skipped"] is True
+    assert result["skip_reason"] == "below_min_severity"
+    assert result["event_severity"] == "info"
+    assert result["min_severity"] == "warning"
 
 
 @pytest.mark.asyncio
