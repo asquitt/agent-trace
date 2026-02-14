@@ -20,7 +20,7 @@ AI Trace provides end-to-end traceability for autonomous agent systems and adds 
 
 **Current version:** `0.2.0`  
 **Maturity:** Beta  
-**Validation snapshot:** `22 passed, 1 skipped` (unit + integration in local environment)
+**Validation snapshot (February 14, 2026):** `26 passed` (full unit + integration on fresh migrated Postgres)
 
 ## Core Capabilities
 
@@ -84,6 +84,7 @@ src/
 ### Trace APIs
 
 - `GET /api/v1/traces`
+- `GET /api/v1/traces/metrics/summary`
 - `GET /api/v1/traces/{trace_id}`
 - `GET /api/v1/traces/{trace_id}/reasoning`
 - `GET /api/v1/traces/idea/{idea_id}/history`
@@ -214,6 +215,14 @@ pytest -q -p pytest_cov -p pytest_asyncio
 GitHub Actions CI is included in:
 
 - `.github/workflows/ci.yml`
+
+## Recent Hardening (February 14, 2026)
+
+- Wired `GET /api/v1/traces/metrics/summary` into storage-backed aggregate metrics.
+- Normalized trace/span timestamp writes to naive UTC in PostgreSQL storage to avoid timezone write failures.
+- Persisted `assistant_response`, `output_data`, and `error_message` in span writes.
+- Fixed trace list span counting by eager-loading spans (prevents detached-instance failures).
+- Added trace integration e2e coverage: `tests/integration/test_traces_api.py`.
 
 ## Notable Documents
 

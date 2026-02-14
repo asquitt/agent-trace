@@ -224,6 +224,39 @@ async def list_traces(
     )
 
 
+@router.get("/metrics/summary", response_model=MetricsSummaryResponse)
+async def get_trace_metrics_summary(
+    storage: StorageDep,
+    auth: AuthDep,
+    org_id: Optional[str] = Query(None, description="Tenant org ID"),
+    from_ts: Optional[datetime] = Query(
+        None,
+        alias="from",
+        description="Filter traces started at or after this timestamp (ISO-8601 UTC)",
+    ),
+    to_ts: Optional[datetime] = Query(
+        None,
+        alias="to",
+        description="Filter traces started at or before this timestamp (ISO-8601 UTC)",
+    ),
+) -> MetricsSummaryResponse:
+    """Get aggregate trace metrics for dashboard and operational rollups."""
+    _require_trace_viewer(auth)
+    resolved_org_id = _resolve_trace_org_scope(auth, org_id)
+    if from_ts and to_ts and from_ts > to_ts:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="'from' must be less than or equal to 'to'",
+        )
+
+    summary = await storage.get_trace_metrics_summary(
+        org_id=resolved_org_id,
+        from_ts=from_ts,
+        to_ts=to_ts,
+    )
+    return MetricsSummaryResponse(**summary)
+
+
 @router.get("/{trace_id}", response_model=TraceResponse)
 async def get_trace(
     trace_id: UUID,

@@ -4,18 +4,26 @@ This module implements the StorageBackend protocol using PostgreSQL
 with async SQLAlchemy for high-performance trace storage.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import UUID
 
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from ...models.trace import AITrace, AITraceReasoning, AITraceSpan
+from ...models.trace import AITrace, AITraceReasoning, AITraceSpan, TraceStatus
 from ..types import ReasoningData, SpanData, TraceData
 
 logger = structlog.get_logger(__name__)
+
+
+def _to_db_datetime(value: str | datetime) -> datetime:
+    """Normalize ISO or datetime input to naive UTC for DB columns."""
+    dt = datetime.fromisoformat(value) if isinstance(value, str) else value
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 class PostgresStorageBackend:
@@ -63,7 +71,7 @@ class PostgresStorageBackend:
                 deployment_id=UUID(trace["deployment_id"]) if trace.get("deployment_id") else None,
                 session_id=UUID(trace["session_id"]) if trace.get("session_id") else None,
                 agent_id=trace.get("agent_id"),
-                started_at=datetime.fromisoformat(trace["started_at"]),
+                started_at=_to_db_datetime(trace["started_at"]),
                 total_input_tokens=trace.get("total_input_tokens", 0),
                 total_output_tokens=trace.get("total_output_tokens", 0),
                 estimated_cost_usd=trace.get("estimated_cost_usd", 0.0),
@@ -94,11 +102,14 @@ class PostgresStorageBackend:
                 model_version=span.get("model_version"),
                 system_prompt=span.get("system_prompt"),
                 user_prompt=span.get("user_prompt"),
+                assistant_response=span.get("assistant_response"),
                 input_data=span.get("input_data"),
-                started_at=datetime.fromisoformat(span["started_at"]),
+                output_data=span.get("output_data"),
+                started_at=_to_db_datetime(span["started_at"]),
                 status=span["status"],
                 input_tokens=span.get("input_tokens", 0),
                 output_tokens=span.get("output_tokens", 0),
+                error_message=span.get("error_message"),
                 span_metadata=span.get("metadata", {}),
             )
             session.add(db_span)
@@ -145,9 +156,9 @@ class PostgresStorageBackend:
             updates: Dictionary of fields to update
         """
         async with self.session_factory() as session:
-            # Convert ISO strings to datetime if present
-            if "completed_at" in updates and isinstance(updates["completed_at"], str):
-                updates["completed_at"] = datetime.fromisoformat(updates["completed_at"])
+            for field in ("started_at", "completed_at"):
+                if field in updates and isinstance(updates[field], (str, datetime)):
+                    updates[field] = _to_db_datetime(updates[field])
 
             stmt = update(AITrace).where(AITrace.id == trace_id).values(**updates)
             await session.execute(stmt)
@@ -163,9 +174,9 @@ class PostgresStorageBackend:
             updates: Dictionary of fields to update
         """
         async with self.session_factory() as session:
-            # Convert ISO strings to datetime if present
-            if "completed_at" in updates and isinstance(updates["completed_at"], str):
-                updates["completed_at"] = datetime.fromisoformat(updates["completed_at"])
+            for field in ("started_at", "completed_at"):
+                if field in updates and isinstance(updates[field], (str, datetime)):
+                    updates[field] = _to_db_datetime(updates[field])
 
             stmt = update(AITraceSpan).where(AITraceSpan.id == span_id).values(**updates)
             await session.execute(stmt)
@@ -262,7 +273,9 @@ class PostgresStorageBackend:
             List of traces matching filters
         """
         async with self.session_factory() as session:
-            query = select(AITrace).order_by(AITrace.started_at.desc())
+            from sqlalchemy.orm import selectinload
+
+            query = select(AITrace).options(selectinload(AITrace.spans)).order_by(AITrace.started_at.desc())
 
             if org_id:
                 query = query.where(AITrace.org_id == org_id)
@@ -326,3 +339,51 @@ class PostgresStorageBackend:
 
             result = await session.execute(query)
             return result.scalar() or 0
+
+    async def get_trace_metrics_summary(
+        self,
+        *,
+        org_id: Optional[str] = None,
+        from_ts: Optional[datetime] = None,
+        to_ts: Optional[datetime] = None,
+    ) -> dict[str, int | float]:
+        """Get aggregate metrics for traces matching the optional filters."""
+        async with self.session_factory() as session:
+            query = select(
+                func.count(AITrace.id).label("total_traces"),
+                func.coalesce(
+                    func.sum(case((AITrace.status == TraceStatus.COMPLETED, 1), else_=0)),
+                    0,
+                ).label("successful_traces"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (AITrace.status.in_([TraceStatus.FAILED, TraceStatus.TIMEOUT]), 1),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label("failed_traces"),
+                func.coalesce(func.sum(AITrace.total_input_tokens), 0).label("total_input_tokens"),
+                func.coalesce(func.sum(AITrace.total_output_tokens), 0).label("total_output_tokens"),
+                func.coalesce(func.sum(AITrace.estimated_cost_usd), 0.0).label("estimated_total_cost_usd"),
+                func.coalesce(func.avg(AITrace.duration_ms), 0.0).label("avg_duration_ms"),
+            )
+
+            if org_id:
+                query = query.where(AITrace.org_id == org_id)
+            if from_ts:
+                query = query.where(AITrace.started_at >= from_ts)
+            if to_ts:
+                query = query.where(AITrace.started_at <= to_ts)
+
+            row = (await session.execute(query)).one()._mapping
+            return {
+                "total_traces": int(row["total_traces"] or 0),
+                "successful_traces": int(row["successful_traces"] or 0),
+                "failed_traces": int(row["failed_traces"] or 0),
+                "total_input_tokens": int(row["total_input_tokens"] or 0),
+                "total_output_tokens": int(row["total_output_tokens"] or 0),
+                "estimated_total_cost_usd": float(row["estimated_total_cost_usd"] or 0.0),
+                "avg_duration_ms": float(row["avg_duration_ms"] or 0.0),
+            }

@@ -49,12 +49,20 @@ def traced(
 
             # Try to extract idea_id from various sources
             idea_id = _extract_idea_id(args, kwargs)
+            operation_name = name or func.__name__
+            trace_tags = list(tags or [])
+            if name:
+                trace_tags.append(f"operation:{name}")
 
             async with tracer.start_trace(
                 trace_type,
                 idea_id=idea_id,
-                tags=tags,
-                metadata={"function": func.__name__, "module": func.__module__},
+                tags=trace_tags or None,
+                metadata={
+                    "function": func.__name__,
+                    "module": func.__module__,
+                    "operation_name": operation_name,
+                },
             ):
                 return await func(*args, **kwargs)  # type: ignore[return-value]
 
