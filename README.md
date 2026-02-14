@@ -28,8 +28,8 @@ AI Trace extends classic LLM tracing into a control plane:
 - Validation evidence:
   - `ruff check --select F src tests` passed
   - `pyright` passed (`0 errors`)
-  - `pytest -q` passed (`42 passed, 2 skipped`) in lightweight local run
-  - `./scripts/run_full_e2e.sh` passed (`44 passed`, fresh DB, migration replay, double test pass)
+  - `pytest -q` passed (`44 passed, 2 skipped`) in lightweight local run
+  - `./scripts/run_full_e2e.sh` passed (`46 passed`, fresh DB, migration replay, double test pass)
 
 ## Architecture
 
