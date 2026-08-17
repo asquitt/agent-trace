@@ -1,14 +1,14 @@
 ---
 name: ship
-description: Safely commit and optionally push verified AI Trace changes without absorbing unrelated work.
+description: Safely commit, push, and hand off verified AI Trace changes without absorbing unrelated work.
 ---
 
 # Ship AI Trace
 
-Use only when the user asks to commit, ship, or push.
+Use when the user asks to commit, ship, push, or deliver a pull request, or when an authorized implementation task reaches a coherent local commit boundary.
 
-1. Read `AGENTS.md`, `CLAUDE.md`, and the project-quality skill.
-2. Inspect `git status -sb`, the working diff, staged diff, branch, and remote. Identify exactly which files belong to the task.
+1. Read `AGENTS.md`, `CLAUDE.md`, the project-quality skill, and the `pr-lifecycle` skill.
+2. Inspect `git status -sb`, the working and staged diffs, current branch, upstream, remote, worktrees, and any open PR for the branch. Identify task-owned files and preserve all unrelated work.
 3. Run the focused and changed-stack verification required by the task. Do not expand into an unrelated global suite solely to manufacture a green status.
 4. For material production, security, isolation, persistence, provider, deployment, or public-UI changes, require blocker-free independent review of the exact current base/head before merge or deployment.
 5. Stage only task-owned files and review `git diff --cached --check`, `git diff --cached --stat`, and the full staged diff.
