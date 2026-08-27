@@ -254,6 +254,11 @@ class PostgresStorageBackend:
         status: Optional[str] = None,
         idea_id: Optional[int] = None,
         correlation_id: Optional[UUID] = None,
+        deployment_id: Optional[UUID] = None,
+        session_id: Optional[UUID] = None,
+        agent_id: Optional[str] = None,
+        from_ts: Optional[datetime] = None,
+        to_ts: Optional[datetime] = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[AITrace]:
@@ -264,6 +269,11 @@ class PostgresStorageBackend:
             status: Filter by status
             idea_id: Filter by idea ID
             correlation_id: Filter by correlation ID
+            deployment_id: Filter by deployment ID
+            session_id: Filter by session ID
+            agent_id: Filter by agent ID
+            from_ts: Filter traces started at or after this timestamp
+            to_ts: Filter traces started at or before this timestamp
             limit: Maximum number of results
             offset: Offset for pagination
 
@@ -281,10 +291,20 @@ class PostgresStorageBackend:
                 query = query.where(AITrace.trace_type == trace_type)
             if status:
                 query = query.where(AITrace.status == status)
-            if idea_id:
+            if idea_id is not None:
                 query = query.where(AITrace.idea_id == idea_id)
             if correlation_id:
                 query = query.where(AITrace.correlation_id == correlation_id)
+            if deployment_id:
+                query = query.where(AITrace.deployment_id == deployment_id)
+            if session_id:
+                query = query.where(AITrace.session_id == session_id)
+            if agent_id:
+                query = query.where(AITrace.agent_id == agent_id)
+            if from_ts:
+                query = query.where(AITrace.started_at >= from_ts)
+            if to_ts:
+                query = query.where(AITrace.started_at <= to_ts)
 
             query = query.limit(limit).offset(offset)
 
@@ -315,6 +335,11 @@ class PostgresStorageBackend:
         status: Optional[str] = None,
         idea_id: Optional[int] = None,
         correlation_id: Optional[UUID] = None,
+        deployment_id: Optional[UUID] = None,
+        session_id: Optional[UUID] = None,
+        agent_id: Optional[str] = None,
+        from_ts: Optional[datetime] = None,
+        to_ts: Optional[datetime] = None,
     ) -> int:
         """Get count of traces matching filters.
 
@@ -323,6 +348,11 @@ class PostgresStorageBackend:
             status: Filter by status
             idea_id: Filter by idea ID
             correlation_id: Filter by correlation ID
+            deployment_id: Filter by deployment ID
+            session_id: Filter by session ID
+            agent_id: Filter by agent ID
+            from_ts: Filter traces started at or after this timestamp
+            to_ts: Filter traces started at or before this timestamp
 
         Returns:
             Count of matching traces
@@ -336,10 +366,20 @@ class PostgresStorageBackend:
                 query = query.where(AITrace.trace_type == trace_type)
             if status:
                 query = query.where(AITrace.status == status)
-            if idea_id:
+            if idea_id is not None:
                 query = query.where(AITrace.idea_id == idea_id)
             if correlation_id:
                 query = query.where(AITrace.correlation_id == correlation_id)
+            if deployment_id:
+                query = query.where(AITrace.deployment_id == deployment_id)
+            if session_id:
+                query = query.where(AITrace.session_id == session_id)
+            if agent_id:
+                query = query.where(AITrace.agent_id == agent_id)
+            if from_ts:
+                query = query.where(AITrace.started_at >= from_ts)
+            if to_ts:
+                query = query.where(AITrace.started_at <= to_ts)
 
             result = await session.execute(query)
             return result.scalar() or 0

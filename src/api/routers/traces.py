@@ -67,6 +67,10 @@ class TraceResponse(BaseModel):
     correlation_id: str
     trace_type: str
     status: str
+    org_id: Optional[str] = None
+    deployment_id: Optional[str] = None
+    session_id: Optional[str] = None
+    agent_id: Optional[str] = None
     idea_id: Optional[int] = None
     ranking_id: Optional[int] = None
     started_at: datetime
@@ -90,6 +94,10 @@ class TraceListItem(BaseModel):
     correlation_id: str
     trace_type: str
     status: str
+    org_id: Optional[str] = None
+    deployment_id: Optional[str] = None
+    session_id: Optional[str] = None
+    agent_id: Optional[str] = None
     idea_id: Optional[int] = None
     started_at: datetime
     duration_ms: Optional[int] = None
@@ -176,9 +184,26 @@ async def list_traces(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(50, ge=1, le=100, description="Items per page"),
     trace_type: Optional[TraceType] = Query(None, description="Filter by trace type"),
-    status: Optional[TraceStatus] = Query(None, description="Filter by status"),
+    status_filter: Optional[TraceStatus] = Query(
+        None,
+        alias="status",
+        description="Filter by status",
+    ),
     idea_id: Optional[int] = Query(None, description="Filter by idea ID"),
     correlation_id: Optional[UUID] = Query(None, description="Filter by correlation ID"),
+    deployment_id: Optional[UUID] = Query(None, description="Filter by deployment ID"),
+    session_id: Optional[UUID] = Query(None, description="Filter by session ID"),
+    agent_id: Optional[str] = Query(None, description="Filter by agent ID"),
+    from_time: Optional[datetime] = Query(
+        None,
+        alias="from",
+        description="Filter traces started at or after this timestamp",
+    ),
+    to_time: Optional[datetime] = Query(
+        None,
+        alias="to",
+        description="Filter traces started at or before this timestamp",
+    ),
 ) -> TraceListResponse:
     """List traces with filtering and pagination.
 
@@ -187,14 +212,26 @@ async def list_traces(
     """
     _require_trace_viewer(auth)
     resolved_org_id = _resolve_trace_org_scope(auth, org_id)
+    from_time_db = _to_db_datetime(from_time)
+    to_time_db = _to_db_datetime(to_time)
+    if from_time_db and to_time_db and from_time_db > to_time_db:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="'from' must be less than or equal to 'to'",
+        )
     offset = (page - 1) * page_size
 
     traces = await storage.list_traces(
         org_id=resolved_org_id,
         trace_type=trace_type.value if trace_type else None,
-        status=status.value if status else None,
+        status=status_filter.value if status_filter else None,
         idea_id=idea_id,
         correlation_id=correlation_id,
+        deployment_id=deployment_id,
+        session_id=session_id,
+        agent_id=agent_id,
+        from_ts=from_time_db,
+        to_ts=to_time_db,
         limit=page_size + 1,  # Fetch one extra to check has_more
         offset=offset,
     )
@@ -207,9 +244,14 @@ async def list_traces(
     total = await storage.get_trace_count(
         org_id=resolved_org_id,
         trace_type=trace_type.value if trace_type else None,
-        status=status.value if status else None,
+        status=status_filter.value if status_filter else None,
         idea_id=idea_id,
         correlation_id=correlation_id,
+        deployment_id=deployment_id,
+        session_id=session_id,
+        agent_id=agent_id,
+        from_ts=from_time_db,
+        to_ts=to_time_db,
     )
 
     items = [
@@ -218,6 +260,10 @@ async def list_traces(
             correlation_id=str(t.correlation_id),
             trace_type=t.trace_type.value if hasattr(t.trace_type, "value") else str(t.trace_type),
             status=t.status.value if hasattr(t.status, "value") else str(t.status),
+            org_id=t.org_id,
+            deployment_id=str(t.deployment_id) if t.deployment_id else None,
+            session_id=str(t.session_id) if t.session_id else None,
+            agent_id=t.agent_id,
             idea_id=t.idea_id,
             started_at=t.started_at,
             duration_ms=t.duration_ms,
@@ -350,6 +396,10 @@ async def get_trace(
         correlation_id=str(trace.correlation_id),
         trace_type=trace.trace_type.value if hasattr(trace.trace_type, "value") else str(trace.trace_type),
         status=trace.status.value if hasattr(trace.status, "value") else str(trace.status),
+        org_id=trace.org_id,
+        deployment_id=str(trace.deployment_id) if trace.deployment_id else None,
+        session_id=str(trace.session_id) if trace.session_id else None,
+        agent_id=trace.agent_id,
         idea_id=trace.idea_id,
         ranking_id=trace.ranking_id,
         started_at=trace.started_at,
@@ -431,6 +481,10 @@ async def get_idea_trace_history(
             correlation_id=str(t.correlation_id),
             trace_type=t.trace_type.value if hasattr(t.trace_type, "value") else str(t.trace_type),
             status=t.status.value if hasattr(t.status, "value") else str(t.status),
+            org_id=t.org_id,
+            deployment_id=str(t.deployment_id) if t.deployment_id else None,
+            session_id=str(t.session_id) if t.session_id else None,
+            agent_id=t.agent_id,
             idea_id=t.idea_id,
             started_at=t.started_at,
             duration_ms=t.duration_ms,

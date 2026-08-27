@@ -21,7 +21,10 @@ def test_shipped_env_example_loads_with_local_compose_contract() -> None:
         settings = Settings(_env_file=PROJECT_ROOT / ".env.example")
 
     assert settings.database_url.endswith("@localhost:5434/ai_trace")
-    assert settings.api_keys == ["replace-me:platform-admin:viewer|operator|admin:*"]
+    assert settings.api_auth_enabled is True
+    assert settings.api_require_tenant_header is True
+    assert settings.api_keys == ["replace-me:local-operator:viewer|operator|admin:acme"]
+    assert settings.browser_session_cookie_secure is False
     assert settings.cors_origins == [
         "http://localhost:3000",
         "http://127.0.0.1:3000",

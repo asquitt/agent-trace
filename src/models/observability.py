@@ -6,7 +6,17 @@ from typing import TYPE_CHECKING, Optional
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from sqlalchemy import BigInteger, Boolean, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM, JSONB, UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -168,7 +178,7 @@ class AgentDeployment(Base):
     traces: Mapped[list["AITrace"]] = relationship("AITrace", back_populates="deployment")
 
     __table_args__ = (
-        Index("uq_agent_deployments_org_key", "org_id", "deployment_key", unique=True),
+        UniqueConstraint("org_id", "deployment_key", name="uq_agent_deployments_org_key"),
         Index("ix_agent_deployments_environment", "environment"),
     )
 
@@ -668,7 +678,7 @@ class ObservabilityOperationRun(Base):
     __tablename__ = "observability_operation_runs"
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    org_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    org_id: Mapped[str] = mapped_column(String(255), nullable=False)
     run_type: Mapped[str] = mapped_column(String(50), nullable=False)
     started_at: Mapped[datetime] = mapped_column(nullable=False, index=True)
     completed_at: Mapped[Optional[datetime]] = mapped_column(index=True)

@@ -7,7 +7,7 @@ from typing import Any, Optional, TypedDict, overload
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import case, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -585,20 +585,43 @@ async def _store_audit_event(
     details: Optional[dict[str, Any]] = None,
 ) -> None:
     async with storage.session_factory() as session:
-        row = SystemAuditEvent(
-            occurred_at=utc_now_naive(),
-            actor_subject=auth.subject,
-            actor_roles=sorted(auth.roles),
+        row = _audit_event_row(
+            auth=auth,
             org_id=org_id,
             action=action,
             resource_type=resource_type,
             resource_id=resource_id,
             request_id=request_id,
             success=success,
-            details=details or {},
+            details=details,
         )
         session.add(row)
         await session.commit()
+
+
+def _audit_event_row(
+    *,
+    auth: AuthContext,
+    org_id: Optional[str],
+    action: str,
+    resource_type: str,
+    resource_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+    success: bool = True,
+    details: Optional[dict[str, Any]] = None,
+) -> SystemAuditEvent:
+    return SystemAuditEvent(
+        occurred_at=utc_now_naive(),
+        actor_subject=auth.subject,
+        actor_roles=sorted(auth.roles),
+        org_id=org_id,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        request_id=request_id,
+        success=success,
+        details=details or {},
+    )
 
 
 class DeploymentUpsertRequest(BaseModel):
@@ -624,6 +647,8 @@ class DeploymentResponse(BaseModel):
     region: Optional[str] = None
     owner: Optional[str] = None
     is_active: bool
+    activation_status: str
+    activated_at: Optional[datetime] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
@@ -635,6 +660,21 @@ class DeploymentListResponse(BaseModel):
     page: int
     page_size: int
     has_more: bool
+
+
+class ActivationStatusResponse(BaseModel):
+    org_id: str
+    state: str
+    deployment_registered: bool
+    telemetry_received: bool
+    deployment_count: int
+    connected_deployments: int
+    active_sessions: int
+    trace_count: int
+    action_count: int
+    last_telemetry_at: Optional[datetime] = None
+    missing_signals: list[str] = Field(default_factory=list)
+    message: str
 
 
 class SessionCreateRequest(BaseModel):
@@ -805,7 +845,6 @@ class BudgetPolicyCreateRequest(BaseModel):
     cooldown_seconds: Optional[int] = None
     notification_targets: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
-    created_by: Optional[str] = None
 
 
 class BudgetPolicyResponse(BaseModel):
@@ -864,7 +903,6 @@ class BudgetPolicyEventListResponse(BaseModel):
 class PolicyApprovalCreateRequest(BaseModel):
     org_id: str
     policy_id: UUID
-    requested_by: Optional[str] = None
     expires_at: Optional[datetime] = None
     reason: Optional[str] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -872,7 +910,6 @@ class PolicyApprovalCreateRequest(BaseModel):
 
 class PolicyApprovalDecisionRequest(BaseModel):
     decision: PolicyApprovalStatus
-    decided_by: Optional[str] = None
     reason: Optional[str] = None
 
 
@@ -953,7 +990,6 @@ class AnomalyCreateRequest(BaseModel):
 class AnomalyUpdateRequest(BaseModel):
     status: AnomalyStatus
     note: Optional[str] = None
-    updated_by: Optional[str] = None
 
 
 class AnomalyResponse(BaseModel):
@@ -1018,7 +1054,6 @@ class AnomalyGroupStatusUpdateRequest(BaseModel):
     fingerprint: str
     status: AnomalyStatus
     note: Optional[str] = None
-    updated_by: Optional[str] = None
     match_statuses: list[AnomalyStatus] = Field(default_factory=list)
 
 
@@ -1214,7 +1249,11 @@ class SiemExportResponse(BaseModel):
     model_config = {"populate_by_name": True}
 
 
-def _deployment_response(dep: AgentDeployment) -> DeploymentResponse:
+def _deployment_response(
+    dep: AgentDeployment,
+    *,
+    activated_at: Optional[datetime] = None,
+) -> DeploymentResponse:
     return DeploymentResponse(
         id=str(dep.id),
         org_id=dep.org_id,
@@ -1226,6 +1265,8 @@ def _deployment_response(dep: AgentDeployment) -> DeploymentResponse:
         region=dep.region,
         owner=dep.owner,
         is_active=dep.is_active,
+        activation_status="activated" if activated_at is not None else "awaiting_telemetry",
+        activated_at=activated_at,
         metadata=dep.deployment_metadata or {},
         created_at=dep.created_at,
         updated_at=dep.updated_at,
@@ -1415,7 +1456,27 @@ async def upsert_deployment(
 
         await session.commit()
         await session.refresh(deployment)
-        return _deployment_response(deployment)
+        action_activated_at = (
+            await session.execute(
+                select(func.min(AgentAction.occurred_at))
+                .join(AgentSession, AgentAction.session_id == AgentSession.id)
+                .where(
+                    AgentSession.deployment_id == deployment.id
+                )
+            )
+        ).scalar_one_or_none()
+        trace_activated_at = (
+            await session.execute(
+                select(func.min(AITrace.started_at)).where(
+                    AITrace.deployment_id == deployment.id
+                )
+            )
+        ).scalar_one_or_none()
+        activated_at = min(
+            [value for value in (action_activated_at, trace_activated_at) if value is not None],
+            default=None,
+        )
+        return _deployment_response(deployment, activated_at=activated_at)
 
 
 @router.get("/deployments", response_model=DeploymentListResponse)
@@ -1460,16 +1521,183 @@ async def list_deployments(
         has_more = len(rows) > page_size
         rows = rows[:page_size]
 
+        activation_by_deployment: dict[UUID, datetime] = {}
+        if rows:
+            deployment_ids = [row.id for row in rows]
+            action_activation_rows = await session.execute(
+                select(
+                    AgentSession.deployment_id,
+                    func.min(AgentAction.occurred_at),
+                )
+                .join(AgentAction, AgentAction.session_id == AgentSession.id)
+                .where(AgentSession.deployment_id.in_(deployment_ids))
+                .group_by(AgentSession.deployment_id)
+            )
+            activation_by_deployment = {
+                row[0]: row[1]
+                for row in action_activation_rows.all()
+                if row[1] is not None
+            }
+            trace_activation_rows = await session.execute(
+                select(
+                    AITrace.deployment_id,
+                    func.min(AITrace.started_at),
+                )
+                .where(
+                    AITrace.deployment_id.in_(deployment_ids),
+                    AITrace.deployment_id.is_not(None),
+                )
+                .group_by(AITrace.deployment_id)
+            )
+            for deployment_id, trace_activated_at in trace_activation_rows.all():
+                if deployment_id is None or trace_activated_at is None:
+                    continue
+                existing = activation_by_deployment.get(deployment_id)
+                activation_by_deployment[deployment_id] = (
+                    min(existing, trace_activated_at)
+                    if existing is not None
+                    else trace_activated_at
+                )
+
         total_result = await session.execute(count_query)
         total = int(total_result.scalar() or 0)
 
         return DeploymentListResponse(
-            deployments=[_deployment_response(dep) for dep in rows],
+            deployments=[
+                _deployment_response(
+                    dep,
+                    activated_at=activation_by_deployment.get(dep.id),
+                )
+                for dep in rows
+            ],
             total=total,
             page=page,
             page_size=page_size,
             has_more=has_more,
         )
+
+
+@router.get("/activation/status", response_model=ActivationStatusResponse)
+async def get_activation_status(
+    storage: StorageDep,
+    settings: SettingsDep,
+    auth: AuthDep,
+    org_id: str = Query(...),
+) -> ActivationStatusResponse:
+    """Derive onboarding activation from durable tenant telemetry."""
+    _require_viewer(auth)
+    _enforce_org_scope(auth, org_id)
+    now = utc_now_naive()
+    activity_cutoff = _active_session_cutoff(
+        now,
+        settings.observability_active_session_inactivity_minutes,
+    )
+    future_cutoff = _activity_future_cutoff(now)
+
+    async with storage.session_factory() as session:
+        deployment_ids = set(
+            (
+                await session.execute(
+                    select(AgentDeployment.id).where(AgentDeployment.org_id == org_id)
+                )
+            ).scalars().all()
+        )
+        trace_row = (
+            await session.execute(
+                select(
+                    func.count(AITrace.id),
+                    func.max(AITrace.started_at),
+                ).where(AITrace.org_id == org_id)
+            )
+        ).one()
+        action_row = (
+            await session.execute(
+                select(
+                    func.count(AgentAction.id),
+                    func.max(AgentAction.occurred_at),
+                )
+                .join(AgentSession, AgentAction.session_id == AgentSession.id)
+                .join(AgentDeployment, AgentSession.deployment_id == AgentDeployment.id)
+                .where(AgentDeployment.org_id == org_id)
+            )
+        ).one()
+        action_deployments = set(
+            (
+                await session.execute(
+                    select(AgentSession.deployment_id)
+                    .join(AgentAction, AgentAction.session_id == AgentSession.id)
+                    .join(AgentDeployment, AgentSession.deployment_id == AgentDeployment.id)
+                    .where(AgentDeployment.org_id == org_id)
+                    .distinct()
+                )
+            ).scalars().all()
+        )
+        trace_deployments = set(
+            (
+                await session.execute(
+                    select(AITrace.deployment_id)
+                    .join(AgentDeployment, AITrace.deployment_id == AgentDeployment.id)
+                    .where(
+                        AgentDeployment.org_id == org_id,
+                        AITrace.deployment_id.is_not(None),
+                    )
+                    .distinct()
+                )
+            ).scalars().all()
+        )
+        active_sessions = int(
+            (
+                await session.execute(
+                    select(func.count(AgentSession.id))
+                    .join(AgentDeployment, AgentSession.deployment_id == AgentDeployment.id)
+                    .where(
+                        AgentDeployment.org_id == org_id,
+                        *_recent_active_session_filters(activity_cutoff, future_cutoff),
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+
+    trace_count = int(trace_row[0] or 0)
+    action_count = int(action_row[0] or 0)
+    telemetry_timestamps = [value for value in (trace_row[1], action_row[1]) if value is not None]
+    last_telemetry_at = max(telemetry_timestamps, default=None)
+    deployment_registered = bool(deployment_ids)
+    telemetry_received = trace_count > 0 or action_count > 0
+    connected_deployments = len(
+        deployment_ids.intersection(action_deployments.union(trace_deployments))
+    )
+    missing_signals: list[str] = []
+    if not deployment_registered:
+        missing_signals.append("deployment_registration")
+    if not telemetry_received:
+        missing_signals.append("agent_telemetry")
+
+    if not deployment_registered:
+        state = "setup_required"
+        message = "Register a deployment to begin activation."
+    elif not telemetry_received:
+        state = "awaiting_telemetry"
+        message = "Deployment registered; send an action or trace to complete activation."
+    else:
+        state = "active"
+        message = "Persisted agent telemetry has been received."
+
+    return ActivationStatusResponse(
+        org_id=org_id,
+        state=state,
+        deployment_registered=deployment_registered,
+        telemetry_received=telemetry_received,
+        deployment_count=len(deployment_ids),
+        connected_deployments=connected_deployments,
+        active_sessions=active_sessions,
+        trace_count=trace_count,
+        action_count=action_count,
+        last_telemetry_at=last_telemetry_at,
+        missing_signals=missing_signals,
+        message=message,
+    )
 
 
 @router.post("/sessions", response_model=SessionResponse, status_code=201)
@@ -1774,6 +2002,7 @@ async def ingest_action_batch(
         accepted = 0
         rejected = 0
         action_ids: list[str] = []
+        accepted_rows: list[AgentAction] = []
         errors: list[str] = []
         latest_event: Optional[datetime] = None
 
@@ -1802,16 +2031,19 @@ async def ingest_action_batch(
                 occurred_at=_to_db_datetime(event.occurred_at),
                 action_metadata=event.metadata,
             )
-            session.add(row)
-            await session.flush()
+            accepted_rows.append(row)
             accepted += 1
-            action_ids.append(str(row.id))
             if event.client_event_id is not None:
                 seen_client_ids.add(event.client_event_id)
 
             occurred_at = _to_db_datetime(event.occurred_at)
             if occurred_at and (latest_event is None or occurred_at > latest_event):
                 latest_event = occurred_at
+
+        if accepted_rows:
+            session.add_all(accepted_rows)
+            await session.flush()
+            action_ids.extend(str(row.id) for row in accepted_rows)
 
         if latest_event:
             session_row.last_activity_at = _monotonic_activity_watermark(
@@ -2030,7 +2262,7 @@ async def create_budget_policy(
             notification_targets=payload.notification_targets,
             status=PolicyStatus.ACTIVE,
             policy_metadata=payload.metadata,
-            created_by=payload.created_by,
+            created_by=auth.subject,
         )
         session.add(row)
         await session.commit()
@@ -2188,7 +2420,7 @@ async def create_policy_approval(
             policy_id=policy.id,
             action_type=policy.action_on_breach,
             status=PolicyApprovalStatus.PENDING,
-            requested_by=payload.requested_by or auth.subject,
+            requested_by=auth.subject,
             requested_at=requested_at,
             expires_at=expires_at,
             approval_metadata={
@@ -2260,7 +2492,7 @@ async def decide_policy_approval(
             return response
 
         row.status = payload.decision
-        row.decided_by = payload.decided_by or auth.subject
+        row.decided_by = auth.subject
         row.decided_at = now
         row.decision_reason = payload.reason
         await session.commit()
@@ -2527,6 +2759,7 @@ async def create_anomaly(
     payload: AnomalyCreateRequest,
     storage: StorageDep,
     auth: AuthDep,
+    request: Request,
 ) -> AnomalyResponse:
     _require_operator(auth)
     async with storage.session_factory() as session:
@@ -2606,6 +2839,23 @@ async def create_anomaly(
             anomaly_metadata=payload.metadata,
         )
         session.add(row)
+        await session.flush()
+        session.add(
+            _audit_event_row(
+                auth=auth,
+                org_id=deployment.org_id,
+                action="anomaly_create",
+                resource_type="anomaly_event",
+                resource_id=str(row.id),
+                request_id=_request_id(request),
+                details={
+                    "status": AnomalyStatus.OPEN.value,
+                    "severity": payload.severity.value,
+                    "anomaly_type": payload.anomaly_type.value,
+                    "deployment_id": str(deployment_id),
+                },
+            )
+        )
         await session.commit()
         await session.refresh(row)
         return _anomaly_response(row)
@@ -2617,6 +2867,7 @@ async def update_anomaly(
     payload: AnomalyUpdateRequest,
     storage: StorageDep,
     auth: AuthDep,
+    request: Request,
 ) -> AnomalyResponse:
     _require_operator(auth)
     now = utc_now_naive()
@@ -2634,9 +2885,10 @@ async def update_anomaly(
             raise HTTPException(status_code=404, detail="Deployment not found")
         _enforce_org_scope(auth, deployment.org_id)
 
+        previous_status = _enum_str(row.status)
         row.status = payload.status
         row.note = payload.note
-        row.updated_by = payload.updated_by
+        row.updated_by = auth.subject
         if payload.status == AnomalyStatus.ACKNOWLEDGED and row.acknowledged_at is None:
             row.acknowledged_at = now
         if payload.status == AnomalyStatus.RESOLVED:
@@ -2644,6 +2896,21 @@ async def update_anomaly(
                 row.acknowledged_at = now
             row.resolved_at = now
 
+        session.add(
+            _audit_event_row(
+                auth=auth,
+                org_id=deployment.org_id,
+                action="anomaly_status_update",
+                resource_type="anomaly_event",
+                resource_id=str(row.id),
+                request_id=_request_id(request),
+                details={
+                    "previous_status": previous_status,
+                    "status": payload.status.value,
+                    "note_supplied": payload.note is not None,
+                },
+            )
+        )
         await session.commit()
         await session.refresh(row)
         return _anomaly_response(row)
@@ -2654,6 +2921,7 @@ async def update_anomaly_group_status(
     payload: AnomalyGroupStatusUpdateRequest,
     storage: StorageDep,
     auth: AuthDep,
+    request: Request,
 ) -> AnomalyGroupStatusUpdateResponse:
     _require_operator(auth)
     _enforce_org_scope(auth, payload.org_id)
@@ -2688,7 +2956,7 @@ async def update_anomaly_group_status(
                 continue
             row.status = payload.status
             row.note = payload.note
-            row.updated_by = payload.updated_by
+            row.updated_by = auth.subject
             if payload.status == AnomalyStatus.ACKNOWLEDGED and row.acknowledged_at is None:
                 row.acknowledged_at = now
             if payload.status == AnomalyStatus.RESOLVED:
@@ -2696,16 +2964,33 @@ async def update_anomaly_group_status(
                     row.acknowledged_at = now
                 row.resolved_at = now
             updated_ids.append(str(row.id))
-        if updated_ids:
-            await session.commit()
-
-    return AnomalyGroupStatusUpdateResponse(
-        fingerprint=payload.fingerprint,
-        status=payload.status.value,
-        matched_count=matched_count,
-        updated_count=len(updated_ids),
-        updated_anomaly_ids=updated_ids,
-    )
+        response = AnomalyGroupStatusUpdateResponse(
+            fingerprint=payload.fingerprint,
+            status=payload.status.value,
+            matched_count=matched_count,
+            updated_count=len(updated_ids),
+            updated_anomaly_ids=updated_ids,
+        )
+        session.add(
+            _audit_event_row(
+                auth=auth,
+                org_id=payload.org_id,
+                action="anomaly_group_status_update",
+                resource_type="anomaly_group",
+                resource_id=payload.fingerprint,
+                request_id=_request_id(request),
+                details={
+                    "status": response.status,
+                    "match_statuses": [item.value for item in status_filters],
+                    "matched_count": response.matched_count,
+                    "updated_count": response.updated_count,
+                    "updated_anomaly_ids": response.updated_anomaly_ids,
+                    "note_supplied": payload.note is not None,
+                },
+            )
+        )
+        await session.commit()
+        return response
 
 
 @router.get("/anomalies", response_model=AnomalyListResponse)
@@ -2886,6 +3171,31 @@ async def list_anomaly_groups(
         page_size=page_size,
         has_more=has_more,
     )
+
+
+@router.get("/anomalies/{anomaly_id}", response_model=AnomalyResponse)
+async def get_anomaly(
+    anomaly_id: UUID,
+    storage: StorageDep,
+    auth: AuthDep,
+    org_id: str = Query(...),
+) -> AnomalyResponse:
+    """Return anomaly detail only when it belongs to the requested tenant."""
+    _require_viewer(auth)
+    _enforce_org_scope(auth, org_id)
+    async with storage.session_factory() as session:
+        query = (
+            select(AnomalyEvent)
+            .join(AgentDeployment, AnomalyEvent.deployment_id == AgentDeployment.id)
+            .where(
+                AnomalyEvent.id == anomaly_id,
+                AgentDeployment.org_id == org_id,
+            )
+        )
+        row = (await session.execute(query)).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Anomaly not found")
+        return _anomaly_response(row)
 
 
 @router.post("/detectors/run", response_model=DetectorRunResponse)
@@ -4133,18 +4443,11 @@ async def get_delegation_chain(
 
 
 @router.get("/dashboard/ui", response_class=HTMLResponse)
-async def dashboard_ui(auth: AuthDep, settings: SettingsDep) -> HTMLResponse:
-    """Simple built-in dashboard for runtime observability inspection."""
+async def dashboard_ui(auth: AuthDep, settings: SettingsDep) -> Response:
+    """Redirect authenticated installations to the operator console."""
     _require_viewer(auth)
     if settings.api_auth_enabled:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "The built-in dashboard is disabled when header-based API authentication "
-                "is enabled. Use authenticated API clients until browser session "
-                "authentication is configured."
-            ),
-        )
+        return RedirectResponse(url="/console/", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
     csp_nonce = token_urlsafe(18)
     html = """<!doctype html>
 <html lang="en">

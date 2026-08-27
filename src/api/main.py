@@ -1,5 +1,6 @@
 """FastAPI application for AI Trace API."""
 
+import hashlib
 import time
 from collections import defaultdict
 from collections.abc import AsyncGenerator
@@ -19,7 +20,7 @@ from ..dependencies import AuthDep
 from ..rate_limit import InMemoryRateLimiter
 from ..security import require_global_admin
 from ..services import ObservabilityOperationsScheduler, public_scheduler_status
-from .routers import observability_router, traces_router
+from .routers import auth_router, console_router, observability_router, traces_router
 
 logger = structlog.get_logger(__name__)
 settings = get_settings()
@@ -77,8 +78,10 @@ app.add_middleware(
 )
 
 # Register routers
+app.include_router(auth_router)
 app.include_router(traces_router)
 app.include_router(observability_router)
+app.include_router(console_router)
 
 
 @app.middleware("http")
@@ -95,9 +98,14 @@ async def request_observability_middleware(request: Request, call_next):  # type
         if limiter is None:
             return await call_next(request)
 
-        principal = request.headers.get(settings.api_key_header) or request.headers.get(
-            "Authorization", "anonymous"
-        )
+        principal = request.headers.get(settings.api_key_header) or request.headers.get("Authorization")
+        if not principal:
+            browser_token = request.cookies.get(settings.browser_session_cookie_name)
+            principal = (
+                f"browser:{hashlib.sha256(browser_token.encode('utf-8')).hexdigest()}"
+                if browser_token
+                else "anonymous"
+            )
         tenant = request.headers.get(settings.api_tenant_header, "-")
         key = f"{principal}:{tenant}"
         if settings.api_rate_limit_per_path:
@@ -217,7 +225,7 @@ async def root() -> dict[str, Any]:
         "endpoints": {
             "traces": "/api/v1/traces",
             "observability": "/api/v1/observability",
-            "observability_dashboard_ui": "/api/v1/observability/dashboard/ui",
+            "operator_console": "/console/",
             "observability_risk_insights": "/api/v1/observability/insights/risk",
             "observability_policy_simulation": "/api/v1/observability/policies/simulate",
             "observability_operations_status": "/api/v1/observability/operations/status",

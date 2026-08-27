@@ -31,6 +31,19 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     org_id = f"smoke-{uuid4().hex[:8]}"
     deployment_key = f"prod-{uuid4().hex[:8]}"
 
+    setup_required_resp = client.get(
+        "/api/v1/observability/activation/status",
+        params={"org_id": org_id},
+    )
+    assert setup_required_resp.status_code == 200
+    assert setup_required_resp.json()["state"] == "setup_required"
+    assert setup_required_resp.json()["deployment_registered"] is False
+    assert setup_required_resp.json()["telemetry_received"] is False
+    assert setup_required_resp.json()["missing_signals"] == [
+        "deployment_registration",
+        "agent_telemetry",
+    ]
+
     deployment_resp = client.post(
         "/api/v1/observability/deployments",
         json={
@@ -45,6 +58,18 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     )
     assert deployment_resp.status_code == 201
     deployment_id = deployment_resp.json()["id"]
+    assert deployment_resp.json()["activation_status"] == "awaiting_telemetry"
+    assert deployment_resp.json()["activated_at"] is None
+
+    pending_activation_resp = client.get(
+        "/api/v1/observability/activation/status",
+        params={"org_id": org_id},
+    )
+    assert pending_activation_resp.status_code == 200
+    assert pending_activation_resp.json()["state"] == "awaiting_telemetry"
+    assert pending_activation_resp.json()["deployment_registered"] is True
+    assert pending_activation_resp.json()["telemetry_received"] is False
+    assert pending_activation_resp.json()["missing_signals"] == ["agent_telemetry"]
 
     session_resp = client.post(
         "/api/v1/observability/sessions",
@@ -74,6 +99,17 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     assert child_session_resp.status_code == 201
     child_session_id = child_session_resp.json()["id"]
 
+    deployments_resp = client.get(
+        "/api/v1/observability/deployments",
+        params={"org_id": org_id},
+    )
+    assert deployments_resp.status_code == 200
+    persisted_deployment = next(
+        row for row in deployments_resp.json()["deployments"] if row["id"] == deployment_id
+    )
+    assert persisted_deployment["activation_status"] == "awaiting_telemetry"
+    assert persisted_deployment["activated_at"] is None
+
     policy_resp = client.post(
         "/api/v1/observability/budget-policies",
         json={
@@ -86,9 +122,11 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
             "action_on_breach": "shutdown",
             "notification_targets": [],
             "metadata": {"suite": "integration"},
+            "created_by": "spoofed-policy-actor",
         },
     )
     assert policy_resp.status_code == 201
+    assert policy_resp.json()["created_by"] == "local-development"
     policy_id = policy_resp.json()["id"]
 
     approval_resp = client.post(
@@ -103,6 +141,7 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     assert approval_resp.status_code == 201
     approval_id = approval_resp.json()["id"]
     assert approval_resp.json()["status"] == "pending"
+    assert approval_resp.json()["requested_by"] == "local-development"
 
     approval_decision_resp = client.post(
         f"/api/v1/observability/policy-approvals/{approval_id}/decision",
@@ -114,6 +153,7 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     )
     assert approval_decision_resp.status_code == 200
     assert approval_decision_resp.json()["status"] == "approved"
+    assert approval_decision_resp.json()["decided_by"] == "local-development"
 
     approvals_list_resp = client.get(
         "/api/v1/observability/policy-approvals",
@@ -186,6 +226,32 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     assert batch_resp.json()["accepted"] == 1
     assert batch_resp.json()["policy_evaluation"] is not None
     assert batch_resp.json()["policy_evaluation"]["breached_policies"] >= 1
+
+    active_activation_resp = client.get(
+        "/api/v1/observability/activation/status",
+        params={"org_id": org_id},
+    )
+    assert active_activation_resp.status_code == 200
+    assert active_activation_resp.json()["state"] == "active"
+    assert active_activation_resp.json()["telemetry_received"] is True
+    assert active_activation_resp.json()["connected_deployments"] == 1
+    assert active_activation_resp.json()["active_sessions"] >= 1
+    assert active_activation_resp.json()["action_count"] >= 1
+    assert active_activation_resp.json()["last_telemetry_at"] is not None
+    assert active_activation_resp.json()["missing_signals"] == []
+
+    activated_deployments_resp = client.get(
+        "/api/v1/observability/deployments",
+        params={"org_id": org_id},
+    )
+    assert activated_deployments_resp.status_code == 200
+    activated_deployment = next(
+        row
+        for row in activated_deployments_resp.json()["deployments"]
+        if row["id"] == deployment_id
+    )
+    assert activated_deployment["activation_status"] == "activated"
+    assert activated_deployment["activated_at"] is not None
 
     duplicate_client_event_id = str(uuid4())
     duplicate_batch_resp = client.post(
@@ -282,6 +348,31 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
         },
     )
     assert anomaly_resp.status_code == 201
+    anomaly_id = anomaly_resp.json()["id"]
+
+    anomaly_detail_resp = client.get(
+        f"/api/v1/observability/anomalies/{anomaly_id}",
+        params={"org_id": org_id},
+    )
+    assert anomaly_detail_resp.status_code == 200
+    assert anomaly_detail_resp.json()["id"] == anomaly_id
+
+    cross_tenant_anomaly_detail_resp = client.get(
+        f"/api/v1/observability/anomalies/{anomaly_id}",
+        params={"org_id": f"other-{org_id}"},
+    )
+    assert cross_tenant_anomaly_detail_resp.status_code == 404
+
+    anomaly_update_resp = client.patch(
+        f"/api/v1/observability/anomalies/{anomaly_id}",
+        json={
+            "status": "open",
+            "note": "reviewed by authenticated operator",
+            "updated_by": "spoofed-anomaly-actor",
+        },
+    )
+    assert anomaly_update_resp.status_code == 200
+    assert anomaly_update_resp.json()["updated_by"] == "local-development"
 
     dashboard_resp = client.get(
         "/api/v1/observability/dashboard/fleet",
@@ -304,7 +395,10 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
         params={"org_id": org_id, "from": from_ts, "to": to_ts},
     )
     assert costs_resp.status_code == 200
-    assert costs_resp.json()["totals"]["action_count"] >= 1
+    assert (
+        costs_resp.json()["totals"]["action_count"]
+        == dashboard_resp.json()["totals"]["action_count"]
+    )
     assert "cost_per_hour_usd" in costs_resp.json()["totals"]
     assert "projected_daily_cost_usd" in costs_resp.json()["totals"]
     assert "avg_cost_per_action_usd" in costs_resp.json()["totals"]
@@ -389,6 +483,33 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     )
     assert group_resolve_resp.status_code == 200
     assert group_resolve_resp.json()["updated_count"] >= 1
+
+    final_anomaly_detail_resp = client.get(
+        f"/api/v1/observability/anomalies/{anomaly_id}",
+        params={"org_id": org_id},
+    )
+    assert final_anomaly_detail_resp.status_code == 200
+    assert final_anomaly_detail_resp.json()["updated_by"] == "local-development"
+
+    anomaly_audit_resp = client.get(
+        "/api/v1/observability/audit/events",
+        params={"org_id": org_id, "page_size": 200},
+    )
+    assert anomaly_audit_resp.status_code == 200
+    anomaly_audit_actions = {
+        event["action"]: event
+        for event in anomaly_audit_resp.json()["events"]
+        if event["action"].startswith("anomaly_")
+    }
+    assert {
+        "anomaly_create",
+        "anomaly_status_update",
+        "anomaly_group_status_update",
+    }.issubset(anomaly_audit_actions)
+    assert all(
+        event["actor_subject"] == "local-development"
+        for event in anomaly_audit_actions.values()
+    )
 
     scoped_anomalies_resp = client.get(
         "/api/v1/observability/anomalies",

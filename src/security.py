@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 from functools import lru_cache
+from typing import Literal
+from uuid import UUID
 
 from fastapi import HTTPException, Request, status
 
@@ -22,6 +25,9 @@ class AuthContext:
     org_ids: frozenset[str]
     auth_enabled: bool
     requested_org_id: str | None = None
+    authentication_method: Literal["local", "api_key", "browser_session"] = "api_key"
+    browser_session_id: UUID | None = None
+    browser_session_expires_at: datetime | None = None
 
     @property
     def is_global_admin(self) -> bool:
@@ -44,7 +50,7 @@ class ApiKeyRecord:
     org_ids: frozenset[str]
 
 
-def _extract_token(request: Request, key_header: str) -> str | None:
+def extract_api_token(request: Request, key_header: str) -> str | None:
     raw = request.headers.get(key_header)
     if raw:
         return raw.strip()
@@ -94,32 +100,13 @@ def _api_key_index(entries: tuple[str, ...]) -> dict[str, ApiKeyRecord]:
     return index
 
 
-def authenticate_request(request: Request, settings: Settings) -> AuthContext:
-    """Authenticate request and build an authorization context."""
-    requested_org_id = request.headers.get(settings.api_tenant_header)
-
-    if not settings.api_auth_enabled:
-        return AuthContext(
-            subject="local-development",
-            roles=frozenset({"viewer", "operator", "admin"}),
-            org_ids=frozenset({"*"}),
-            auth_enabled=False,
-            requested_org_id=requested_org_id,
-        )
-
-    if settings.api_require_tenant_header and not requested_org_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"{settings.api_tenant_header} header is required",
-        )
-
-    token = _extract_token(request, settings.api_key_header)
-    if not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing API key",
-        )
-
+def authenticate_api_key_token(
+    token: str,
+    settings: Settings,
+    *,
+    requested_org_id: str | None = None,
+) -> AuthContext:
+    """Authenticate a raw API token without retaining or returning it."""
     try:
         record = _api_key_index(tuple(settings.api_keys)).get(token)
     except ValueError as exc:
@@ -139,6 +126,41 @@ def authenticate_request(request: Request, settings: Settings) -> AuthContext:
         roles=record.roles,
         org_ids=record.org_ids,
         auth_enabled=True,
+        requested_org_id=requested_org_id,
+        authentication_method="api_key",
+    )
+
+
+def authenticate_request(request: Request, settings: Settings) -> AuthContext:
+    """Authenticate request and build an authorization context."""
+    requested_org_id = request.headers.get(settings.api_tenant_header)
+
+    if not settings.api_auth_enabled:
+        return AuthContext(
+            subject="local-development",
+            roles=frozenset({"viewer", "operator", "admin"}),
+            org_ids=frozenset({"*"}),
+            auth_enabled=False,
+            requested_org_id=requested_org_id,
+            authentication_method="local",
+        )
+
+    if settings.api_require_tenant_header and not requested_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{settings.api_tenant_header} header is required",
+        )
+
+    token = extract_api_token(request, settings.api_key_header)
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing API key",
+        )
+
+    return authenticate_api_key_token(
+        token,
+        settings,
         requested_org_id=requested_org_id,
     )
 

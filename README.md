@@ -23,26 +23,30 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime-governance
 ## Current Product Status
 
 - Version: `0.2.0`
-- Maturity: `Backend Beta / Product Alpha`
+- Maturity: `Backend Beta / Operator Console Alpha`
 - Release posture: not production-ready
 - Last code validation: August 27, 2026 (UTC)
 - Current validation snapshot:
   - `ruff check --select F src tests` passed
   - `pyright` passed (`0 errors`)
-  - `pytest -q tests/unit` passed (`120 passed`)
-  - `pytest -q -o addopts='' tests/integration` passed (`6 passed`) against PostgreSQL,
-    including durable scheduler fencing and fail-closed notification persistence
+  - `pytest -q` passed (`136 passed`) against PostgreSQL, including browser-session
+    persistence, tenant-scoped operator APIs, durable scheduler fencing, and fail-closed
+    notification persistence
+  - operator console `npm test`, TypeScript validation, production build, and npm audit
+    passed (`6 tests`, zero known vulnerabilities)
   - the fail-closed security gate passed against 69 exact hash-locked runtime and build
     dependencies with zero known vulnerabilities
+  - the exact-image performance gate passed 284 requests with zero failures after
+    matching the 24-request gate concurrency to a 24-connection database pool; write
+    p95 was 505ms and the worst read p95 was 597ms
 - Release blockers:
-  - production browser session authentication and the product frontend are not built
+  - the authenticated operator console is implemented and locally runtime-verified, but
+    no hosted deployment or public-environment identity has been verified
   - runtime `shutdown`/`throttle` delivery and agent acknowledgement are not implemented;
     current controls are persisted requests and audit records only
   - automated scheduler outbound notifications are intentionally fail-closed until a
     durable, idempotent outbox/claim path exists; scheduled runs persist a zero-attempt
     notification summary with `skip_reason=durable_outbox_required`
-  - the latest scheduled [Production Gates run](https://github.com/asquitt/agent-trace/actions/runs/31377820684)
-    is red on fleet-dashboard latency
   - retained February 14 E2E, performance, DR, and security reports are historical
     evidence, not validation of the current release candidate; the old security report
     is specifically invalid because its permissive threshold allowed a non-zero audit
@@ -60,7 +64,7 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime-governance
 
 | Capability | Status | Primary Endpoints |
 |---|---|---|
-| Fleet observability across deployments | API beta; UI development-only | `GET /api/v1/observability/dashboard/fleet`, `GET /api/v1/observability/dashboard/ui` |
+| Fleet observability across deployments | API beta; authenticated operator console alpha | `GET /api/v1/observability/dashboard/fleet`, `/console/` |
 | Session lifecycle management | Shipped | `POST /api/v1/observability/sessions`, `PATCH /api/v1/observability/sessions/{session_id}`, `GET /api/v1/observability/sessions/active` |
 | Anomaly detection and triage | Shipped | `POST /api/v1/observability/detectors/run`, `GET /api/v1/observability/anomalies`, `GET /api/v1/observability/anomalies/groups` |
 | Budget policy evaluation and control requests | Backend beta; no runtime delivery | `POST /api/v1/observability/budget-policies`, `POST /api/v1/observability/policies/evaluate`, `GET /api/v1/observability/budget-policies/events` |
@@ -78,6 +82,8 @@ src/
 ├── api/
 │   ├── main.py                  # FastAPI app, middleware, health/metrics
 │   └── routers/
+│       ├── auth.py              # API-key-to-browser-session exchange
+│       ├── console.py           # Same-origin production console assets
 │       ├── traces.py            # Trace APIs
 │       └── observability.py     # Fleet/session/runtime/policy APIs
 ├── cli/
@@ -93,6 +99,7 @@ src/
 ├── security.py                  # API auth, RBAC, org scope enforcement
 ├── rate_limit.py                # In-memory request limiter with guardrails
 └── config.py                    # Environment-backed settings
+web/                             # React/TypeScript operator console
 ```
 
 ## Getting Started (Local)
@@ -108,6 +115,10 @@ src/
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+cd web
+npm ci
+npm run build
+cd ..
 ```
 
 ### 3. Start dependencies
@@ -136,7 +147,13 @@ uvicorn src.api.main:app --reload
 Open:
 
 - API docs: `http://127.0.0.1:8000/docs`
-- Built-in dashboard UI: `http://127.0.0.1:8000/api/v1/observability/dashboard/ui`
+- Operator console: `http://127.0.0.1:8000/console/`
+
+The example `API_KEYS` entry uses `replace-me` as an explicitly local-only credential.
+Enter that value on the console sign-in screen, select the `acme` organization, and
+replace the credential before any shared or non-development use. The example disables
+the browser cookie `Secure` flag only so plain-HTTP localhost works; production preflight
+requires `BROWSER_SESSION_COOKIE_SECURE=true`.
 
 ## Docker Runtime
 
@@ -165,6 +182,15 @@ Container startup guard rails:
 - `python scripts/production_preflight.py`: script wrapper for preflight checks
 
 ## API Surface
+
+### Browser session APIs
+
+- `POST /api/v1/auth/browser/sessions`
+- `GET /api/v1/auth/browser/session`
+- `DELETE /api/v1/auth/browser/session`
+
+The API key is exchanged once for a database-backed, `HttpOnly`, same-site session
+cookie. Unsafe cookie-authenticated requests also require the matching CSRF token.
 
 ### Trace APIs
 
@@ -196,6 +222,7 @@ Container startup guard rails:
 - `POST /api/v1/observability/anomalies`
 - `PATCH /api/v1/observability/anomalies/{anomaly_id}`
 - `GET /api/v1/observability/anomalies`
+- `GET /api/v1/observability/anomalies/{anomaly_id}`
 - `GET /api/v1/observability/anomalies/groups`
 - `POST /api/v1/observability/anomalies/groups/status`
 - `POST /api/v1/observability/detectors/run`
@@ -206,6 +233,7 @@ Container startup guard rails:
 - `GET /api/v1/observability/audit/events`
 - `POST /api/v1/observability/exports/siem`
 - `GET /api/v1/observability/dashboard/fleet`
+- `GET /api/v1/observability/activation/status`
 - `GET /api/v1/observability/costs/summary`
 - `GET /api/v1/observability/insights/risk`
 - `GET /api/v1/observability/memory/consistency`
@@ -213,9 +241,10 @@ Container startup guard rails:
 - `GET /api/v1/observability/dashboard/ui`
 
 Anomaly endpoints support optional `deployment_id` filtering for targeted triage.
-The built-in dashboard is development-only and deliberately returns 503 when
-header-based production authentication is enabled; use authenticated API clients
-until browser session authentication is configured.
+The legacy embedded dashboard remains available only when authentication is disabled.
+Authenticated environments redirect that route to the same-origin `/console/` app,
+which supports fleet activation, anomaly triage, trace/span drill-down, retry states,
+and session-attributed CSRF-protected mutations.
 
 ACTIVE-session projections accept at most five minutes of client clock skew. Session
 starts, heartbeats, and action events farther in the future are rejected with HTTP 422,
@@ -263,6 +292,24 @@ Configure with `.env` (see `.env.example`).
 - `API_RATE_LIMIT_WINDOW_SECONDS`
 - `API_RATE_LIMIT_PER_PATH`
 - `API_RATE_LIMIT_MAX_KEYS`
+- `BROWSER_SESSION_COOKIE_SECURE` (must be `true` in production)
+- `BROWSER_SESSION_TTL_MINUTES`
+- `BROWSER_CSRF_HEADER`
+- `OPERATOR_CONSOLE_DIST_DIR`
+
+The console shell and hashed static assets are public so the sign-in screen can load;
+all operational data APIs require an authenticated session. Unsafe browser requests
+also require the configured CSRF header.
+
+### Database capacity
+
+- `DATABASE_POOL_SIZE`
+- `DATABASE_MAX_OVERFLOW`
+
+Size the database pool against the deployment's worker count, database connection
+budget, and measured request concurrency. The August 27 performance profile used a
+24-connection pool with no overflow for 24 concurrent requests; this is validation
+evidence for that profile, not a universal production sizing rule.
 
 ### Scheduler and runtime controls
 
@@ -301,7 +348,8 @@ Configure with `.env` (see `.env.example`).
 
 ## Production Readiness Checklist
 
-1. Enable API auth, tenant enforcement, and request rate limiting.
+1. Enable API auth, tenant enforcement, request rate limiting, and HTTPS-only browser
+   session cookies.
 2. Use managed Postgres/Redis with backups, restore drills, and secret rotation.
 3. Run migrations as part of deployment rollout.
 4. Scope scheduler orgs explicitly. Configure notification channels only for manual
@@ -310,9 +358,12 @@ Configure with `.env` (see `.env.example`).
 5. Require approval for shutdown control requests.
 6. Wire `/health/live`, `/health/ready`, and `/metrics` into orchestration and alerting.
 7. Export SIEM bundles into security analytics workflows.
-8. Run deployment preflight checks (`ai-trace-preflight`) before release.
+8. Build the console into `OPERATOR_CONSOLE_DIST_DIR`, then run deployment preflight
+   checks (`ai-trace-preflight`) before release.
 9. Validate release path with full e2e (`./scripts/run_full_e2e.sh`).
 10. Run production gates (`./scripts/security_gate.sh`, `./scripts/backup_restore_drill.sh`, `./scripts/run_perf_gate.sh`).
+11. Probe `/console/` on the exact image and verify its CSP, no-store HTML policy,
+    immutable hashed assets, rendered application identity, and sign-in journey.
 
 ## Quality Gates
 
@@ -331,6 +382,8 @@ docker build -f docker/Dockerfile .
 ## Security and Governance Notes
 
 - API auth + RBAC + tenant scope enforcement are available and should be enabled in production.
+- Browser sessions store only token hashes, are tenant/role scoped at creation, require
+  CSRF validation for unsafe methods, and attribute mutations to the authenticated subject.
 - Shutdown control requests can be approval-gated and audited through policy-approval APIs.
 - System-level audit events are persisted and queryable for governance and incident review.
 - SIEM export supports anomaly, policy, operations, and audit bundles for external retention.
@@ -339,10 +392,10 @@ docker build -f docker/Dockerfile .
 
 Near-term focus areas:
 
-- Browser-session authentication and a production product frontend
 - Acknowledged runtime adapters for throttle and shutdown delivery
-- Session heartbeat/staleness reconciliation and reliable active-fleet state
-- Trace exploration and drill-down workflows in the operator experience
+- Durable, idempotent scheduled notification delivery
+- Hosted console deployment, public identity, and customer-journey evidence
+- SSO, user provisioning, and API-key lifecycle administration
 - Longer-horizon anomaly baselines and seasonality-aware detection
 - Adaptive suppression controls (beyond static dedupe windows)
 
