@@ -18,6 +18,15 @@ DB_USER="${E2E_DB_USER:-postgres}"
 DB_PASSWORD="${E2E_DB_PASSWORD:-postgres}"
 DATABASE_URL="postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@localhost:${PORT}/${DB_NAME}"
 
+ALEMBIC_BIN="${E2E_ALEMBIC_BIN:-./.venv/bin/alembic}"
+if [[ ! -x "$ALEMBIC_BIN" ]]; then
+  ALEMBIC_BIN="$(command -v alembic)"
+fi
+PYTEST_BIN="${E2E_PYTEST_BIN:-./.venv/bin/pytest}"
+if [[ ! -x "$PYTEST_BIN" ]]; then
+  PYTEST_BIN="$(command -v pytest)"
+fi
+
 cleanup() {
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 }
@@ -47,16 +56,16 @@ if ! docker exec "$CONTAINER_NAME" pg_isready -U "$DB_USER" -d "$DB_NAME" >/dev/
 fi
 
 echo "[e2e] migration upgrade"
-DATABASE_URL="$DATABASE_URL" ./.venv/bin/alembic upgrade head
+DATABASE_URL="$DATABASE_URL" "$ALEMBIC_BIN" upgrade head
 
 echo "[e2e] test pass #1"
-DATABASE_URL="$DATABASE_URL" ./.venv/bin/pytest -q
+DATABASE_URL="$DATABASE_URL" "$PYTEST_BIN" -q
 
 echo "[e2e] migration replay (downgrade 001 -> upgrade head)"
-DATABASE_URL="$DATABASE_URL" ./.venv/bin/alembic downgrade 001
-DATABASE_URL="$DATABASE_URL" ./.venv/bin/alembic upgrade head
+DATABASE_URL="$DATABASE_URL" "$ALEMBIC_BIN" downgrade 001
+DATABASE_URL="$DATABASE_URL" "$ALEMBIC_BIN" upgrade head
 
 echo "[e2e] test pass #2"
-DATABASE_URL="$DATABASE_URL" ./.venv/bin/pytest -q
+DATABASE_URL="$DATABASE_URL" "$PYTEST_BIN" -q
 
 echo "[e2e] success"

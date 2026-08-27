@@ -2,7 +2,7 @@
 #
 # Install both hooks with: ./scripts/install_git_hooks.sh
 # Run manually with: ./.venv/bin/pre-commit run --all-files
-default_install_hook_types: [pre-commit, pre-push]
+default_install_hook_types: [pre-commit]
 
 repos:
   - repo: local
@@ -14,11 +14,3 @@ repos:
         pass_filenames: false
         always_run: true
         stages: [pre-commit]
-
-      - id: local-push-ci
-        name: Local push CI
-        entry: bash scripts/local_ci.sh --push
-        language: system
-        pass_filenames: false
-        always_run: true
-        stages: [pre-push]

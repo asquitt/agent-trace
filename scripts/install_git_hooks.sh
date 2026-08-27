@@ -15,5 +15,9 @@ if [[ ! -x "$PRE_COMMIT_BIN" ]]; then
   fi
 fi
 
-"$PRE_COMMIT_BIN" install --install-hooks --hook-type pre-commit --hook-type pre-push
+"$PRE_COMMIT_BIN" install --install-hooks --hook-type pre-commit
+
+HOOK_DIR="$(git rev-parse --git-path hooks)"
+mkdir -p "$HOOK_DIR"
+install -m 0755 "$ROOT_DIR/.githooks/pre-push" "$HOOK_DIR/pre-push"
 echo "[hooks] installed pre-commit and pre-push local CI hooks"

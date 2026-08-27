@@ -74,7 +74,9 @@ python -m pip install -e ".[dev]"
 ```
 
 The pre-commit hook runs staged-diff validation and Python undefined-name/import checks.
-The pre-push hook fails closed if required tooling is missing, then runs Python lint and
+The native pre-push hook reads every pushed ref and validates each non-delete commit in a
+clean detached clone, so another branch or uncommitted working-tree fixes cannot certify
+the wrong SHA. It fails closed if required tooling is missing, then runs Python lint and
 type checks, console dependency installation/tests/type-check/build, the PostgreSQL test
 and migration-replay lifecycle, the locked-dependency security gate, and a production
 Docker build. Run either gate directly when needed:
