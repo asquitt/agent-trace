@@ -62,7 +62,8 @@ dev = [
     "pytest-cov>=4.1.0",
     "ruff>=0.1.0",
     "pyright>=1.1.350",
-    "pre-commit>=3.6.0",
+    # pre-commit 4 requires a newer Git than the supported local Git 2.26 toolchain.
+    "pre-commit>=3.6.0,<4.0.0",
     "bandit>=1.7.8",
     "pip-audit>=2.7.0",
 ]

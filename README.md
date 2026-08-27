@@ -61,6 +61,32 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime-governance
   - Synthetic performance gate for core observability APIs
 - Report artifacts are published under `docs/reports/security`, `docs/reports/dr`, and `docs/reports/perf`.
 
+## Local CI Enforcement
+
+GitHub-hosted pull-request CI is intentionally disabled. Repository-owned hooks run the
+required checks before code leaves a workstation, following the same local-first model as
+Orbitr:
+
+```bash
+python -m pip install -e ".[dev]"
+(cd web && npm ci --no-audit --no-fund)
+./scripts/install_git_hooks.sh
+```
+
+The pre-commit hook runs staged-diff validation and Python undefined-name/import checks.
+The pre-push hook fails closed if required tooling is missing, then runs Python lint and
+type checks, console dependency installation/tests/type-check/build, the PostgreSQL test
+and migration-replay lifecycle, the locked-dependency security gate, and a production
+Docker build. Run either gate directly when needed:
+
+```bash
+./scripts/local_ci.sh --commit
+./scripts/local_ci.sh --push
+```
+
+The scheduled/manual production-gate workflow remains separate because backup/restore and
+synthetic performance drills are operational checks, not pull-request CI.
+
 ## Core Capabilities
 
 | Capability | Status | Primary Endpoints |
