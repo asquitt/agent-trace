@@ -14,6 +14,7 @@
   - `alembic/versions/005_observability_operation_runs.py`
   - `alembic/versions/006_policy_action_approvals.py`
   - `alembic/versions/007_system_audit_events.py`
+  - `alembic/versions/008_observability_scheduler_lease.py`
 - Added observability ORM domain model:
   - `src/models/observability.py`
 - Linked observability dimensions into tracing model + tracer context:
@@ -69,7 +70,10 @@
     - policy simulation/replay endpoint shipped (`POST /api/v1/observability/policies/simulate`) with rollback-only execution and aggregate projection outputs
     - policy cooldown historical-evaluation bug fixed (`triggered_at <= as_of`) so replay windows are temporally correct
     - runtime notification transport expanded to multi-channel dispatch (webhook + Slack + PagerDuty) with channel-aware payload shaping and per-channel delivery stats
-    - scheduler and API runtime notification dispatch paths unified on the multi-channel notification engine
+    - scheduler and API runtime notification dispatch paths were initially unified on the
+      multi-channel notification engine; scheduler outbound delivery was subsequently
+      disabled pending a durable outbox/idempotent claim path, while manual API dispatch
+      retains the shared transport helpers
     - SIEM export delivery path upgraded from webhook-only to generic notification target routing (`notification_targets` with legacy `target_webhook` compatibility)
     - notification unit coverage extended for cross-channel routing and payload dispatch behavior
     - integration coverage extended for policy simulation side-effect guarantees and SIEM export target validation
@@ -114,7 +118,8 @@
 - Added optional background operations scheduler:
   - startup/shutdown lifecycle integration in FastAPI app
   - interval detectors/policy loop across configured orgs
-  - webhook notification dispatch for detector/policy summaries
+  - detector/policy notification summaries; outbound scheduler delivery is now
+    fail-closed pending a durable outbox
   - retry/backoff controls for webhook delivery
 - Added persistent operations run logs:
   - table `observability_operation_runs`

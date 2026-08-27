@@ -685,6 +685,18 @@ class ObservabilityOperationRun(Base):
     )
 
 
+class ObservabilitySchedulerLease(Base):
+    """Durable scheduler ownership lease with a monotonic fencing token."""
+
+    __tablename__ = "observability_scheduler_leases"
+
+    lease_name: Mapped[str] = mapped_column(String(120), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    fence_token: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    lease_expires_at: Mapped[datetime] = mapped_column(nullable=False, index=True)
+    heartbeat_at: Mapped[datetime] = mapped_column(nullable=False)
+
+
 class SystemAuditEvent(Base):
     """Immutable-style audit event for control-plane actions."""
 

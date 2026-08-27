@@ -1,0 +1,2 @@
+# Direct PEP 517 backend used to build the application wheel.
+hatchling==1.32.0

@@ -64,6 +64,10 @@ spec:
               value: "100000"
             - name: OBSERVABILITY_SCHEDULER_ENABLED
               value: "true"
+            - name: OBSERVABILITY_SCHEDULER_ENABLE_NOTIFICATIONS
+              value: "false"
+            - name: OBSERVABILITY_SCHEDULER_LEASE_SECONDS
+              value: "30"
             - name: OBSERVABILITY_SCHEDULER_ORG_IDS
               valueFrom:
                 configMapKeyRef:

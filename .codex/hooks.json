@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/Users/demarioasquitt/Desktop/Projects/Entrepreneurial/traceability/.codex/hooks/arch-review-inject.sh'",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/Users/demarioasquitt/Desktop/Projects/Entrepreneurial/traceability/.codex/hooks/stop-quality-prompt.sh'",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

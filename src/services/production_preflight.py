@@ -56,12 +56,19 @@ def run_preflight(settings: Settings) -> list[CheckResult]:
             "Scheduler requires explicit org scope when enabled (`OBSERVABILITY_SCHEDULER_ORG_IDS`).",
         ),
         _bool_check(
+            lambda: not settings.observability_scheduler_enable_notifications,
+            (
+                "Scheduler notifications must remain disabled until durable outbox delivery "
+                "is implemented (`OBSERVABILITY_SCHEDULER_ENABLE_NOTIFICATIONS=false`)."
+            ),
+        ),
+        _bool_check(
             lambda: (
                 len(settings.observability_notification_webhooks) > 0
                 or len(settings.observability_notification_slack_webhooks) > 0
                 or len(settings.observability_notification_pagerduty_routing_keys) > 0
             ),
-            "At least one notification channel should be configured for runtime controls.",
+            "At least one notification channel should be configured for manual runtime/SIEM dispatch.",
             status_on_fail="warn",
         ),
         _bool_check(

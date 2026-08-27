@@ -27,6 +27,7 @@ from src.models import (  # noqa: F401
     Idea,
     MemorySnapshot,
     ObservabilityOperationRun,
+    ObservabilitySchedulerLease,
     Ranking,
 )
 

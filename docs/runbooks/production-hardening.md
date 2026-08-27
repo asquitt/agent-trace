@@ -1,6 +1,6 @@
 # Production Hardening Runbook
 
-Last updated: February 14, 2026 (post-gate validation)
+Last updated: August 27, 2026
 
 ## Scope
 
@@ -35,7 +35,12 @@ This runbook operationalizes production hardening for AI Trace across deployment
   Evidence: `docs/reports/perf/perf-gate-20260214T194058Z.json` (`status=passed`, `error_rate=0.0`).
 - [x] `scripts/backup_restore_drill.sh` passes with matching before/after counts.
   Evidence: `docs/reports/dr/backup-restore-drill-20260214T194129Z.json` (`before=after=1/1/1`).
-- [x] Security gate (`bandit`, `pip-audit`, authz tests) passes.
-  Evidence: `docs/reports/security/security-gate-20260214T194129Z.json` (`status=passed`).
+- [ ] Fail-closed security gate passes for the release candidate: `bandit`, the
+  hash-locked production dependency audit, and endpoint security-contract tests.
+  The retained February 14 report is invalid release evidence: it marked the gate passed
+  despite a broad environment `pip-audit` exiting non-zero with 47 findings. Generate
+  fresh production-graph evidence with `./scripts/security_gate.sh`; every production
+  finding requires remediation or explicit, unexpired risk acceptance under
+  `docs/security/vulnerability-waivers.json`.
 - [x] Alert routes and on-call escalations are configured and tested.
   References: `docs/runbooks/oncall-operations.md`, `docs/runbooks/incident-response.md`.

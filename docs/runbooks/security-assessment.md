@@ -1,6 +1,6 @@
 # Security Assessment Runbook
 
-Last updated: February 14, 2026
+Last updated: August 27, 2026
 
 ## Objective
 
@@ -11,10 +11,75 @@ Provide repeatable security gates for each release and quarterly external review
 Run:
 
 ```bash
-bandit -q -r src scripts
-pip-audit
-pytest -q tests/unit/test_security.py
+./scripts/security_gate.sh
 ```
+
+The gate runs all of the following and fails if any result cannot be collected or
+validated:
+
+1. `bandit` against `src` and `scripts`.
+2. `pip-audit --strict` against the exact, hash-checked runtime and build graphs in
+   `requirements/production.lock` and `requirements/build.lock`, without resolving a new
+   graph. Docker consumes these same artifacts. Development extras and unrelated packages
+   in the invoking Python environment are not counted as Docker findings.
+3. The authentication, tenant-isolation, global-metrics, and embedded-dashboard
+   security contracts in `tests/unit/test_security.py`, `tests/unit/test_api_metrics.py`,
+   `tests/unit/test_observability_api_security.py`, and
+   `tests/unit/test_docker_build_contract.py`.
+
+The dependency audit is evaluated from structured JSON. A command failure, resolution
+failure, missing hash, lock/audit graph mismatch, skipped dependency, malformed output,
+inconsistent exit code, or unwaived known vulnerability fails the release gate. The
+report records the audited lock's SHA-256. There is no vulnerability-count allowance.
+
+## Maintaining the Production Lock
+
+The lock targets the digest-pinned Python 3.11.15 Linux image in `docker/Dockerfile`.
+Regenerate it only as an intentional dependency update and review the complete diff:
+
+```bash
+uv pip compile pyproject.toml \
+  --python-version 3.11.15 \
+  --python-platform linux \
+  --generate-hashes \
+  --no-annotate \
+  --upgrade \
+  --output-file requirements/production.lock
+uv pip compile requirements/build.in \
+  --python-version 3.11.15 \
+  --python-platform linux \
+  --generate-hashes \
+  --no-annotate \
+  --upgrade \
+  --output-file requirements/build.lock
+./scripts/security_gate.sh
+docker build -f docker/Dockerfile .
+```
+
+The Docker builder installs the exact build lock and creates the application wheel with
+`--no-build-isolation --no-deps`. The runtime stage installs the exact production lock,
+installs only that wheel, and runs `pip check`. Editable local development remains
+`pip install -e ".[dev]"` and is intentionally separate from the Docker artifacts.
+
+## Vulnerability Waivers
+
+The default waiver policy is `docs/security/vulnerability-waivers.json`. A waiver must
+match an exact package and vulnerability ID (or a reported alias) and include all of:
+
+```json
+{
+  "id": "WAIVER-2026-001",
+  "package": "example-package",
+  "vulnerability_id": "CVE-2099-0001",
+  "owner": "security@example.com",
+  "reason": "Compensating control and remediation plan.",
+  "expires_on": "2026-09-01"
+}
+```
+
+The expiry is an ISO `YYYY-MM-DD` date. Missing, malformed, duplicate, or expired
+waivers fail the gate. Waivers are temporary risk acceptances: review them as security
+changes and remove them when the package is remediated.
 
 Optional deep gate:
 
@@ -34,7 +99,9 @@ For third-party pentest execution, provide:
 
 ## Signoff Criteria
 
-- No critical/high findings from automated gates.
-- Dependency vulnerabilities remediated or formally risk-accepted.
+- No findings from automated source gates.
+- Zero unwaived known vulnerabilities in the exact hash-locked runtime and build graphs.
+- Every retained vulnerability waiver has an accountable owner, documented reason,
+  and future expiry date.
 - Authz and tenant-scoping tests pass.
 - DR and perf gates pass for release candidate.

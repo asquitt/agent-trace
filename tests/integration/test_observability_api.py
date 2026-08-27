@@ -1,12 +1,15 @@
 """Integration smoke tests for observability API endpoints."""
 
-from datetime import datetime, timedelta, timezone
-from uuid import uuid4
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import app
+from src.config import Settings, get_settings
+from src.database import async_session_factory
+from src.models.observability import AgentDeployment, AgentSession, SessionStatus
 
 
 @pytest.fixture()
@@ -21,7 +24,7 @@ def client() -> TestClient:
 
 def test_observability_end_to_end_smoke(client: TestClient) -> None:
     """Validate core Phase 1 endpoints together."""
-    start = datetime.now(timezone.utc)
+    start = datetime.now(UTC)
     from_ts = start.isoformat()
     to_ts = (start + timedelta(minutes=1)).isoformat()
 
@@ -526,3 +529,198 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
     assert "AI Trace Runtime Console" in ui_resp.text
     assert "Active Session Feed" in ui_resp.text
     assert "Risk Signals (Window over Window)" in ui_resp.text
+
+
+def test_stale_active_sessions_are_excluded_from_product_projections(
+    client: TestClient,
+) -> None:
+    """Validate freshness filtering against PostgreSQL without mutating lifecycle state."""
+    threshold_minutes = 30
+    now = datetime.now(UTC).replace(microsecond=0)
+    fresh_started_at = now - timedelta(minutes=5)
+    stale_started_at = now - timedelta(hours=2)
+    org_id = f"session-freshness-{uuid4().hex[:8]}"
+    deployment_id: str | None = None
+    session_ids: list[str] = []
+    previous_override = app.dependency_overrides.get(get_settings)
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None,
+        api_auth_enabled=False,
+        api_require_tenant_header=False,
+        observability_active_session_inactivity_minutes=threshold_minutes,
+    )
+
+    async def _clear_activity(session_id: str) -> None:
+        async with async_session_factory() as session:
+            row = await session.get(AgentSession, UUID(session_id))
+            assert row is not None
+            row.last_activity_at = None
+            await session.commit()
+
+    async def _session_statuses() -> list[str]:
+        async with async_session_factory() as session:
+            rows = [
+                await session.get(AgentSession, UUID(session_id))
+                for session_id in session_ids
+            ]
+            return [
+                str(getattr(row.status, "value", row.status))
+                for row in rows
+                if row is not None
+            ]
+
+    async def _cleanup() -> None:
+        if deployment_id is None:
+            return
+        async with async_session_factory() as session:
+            deployment = await session.get(AgentDeployment, UUID(deployment_id))
+            if deployment is not None:
+                await session.delete(deployment)
+                await session.commit()
+
+    try:
+        deployment_resp = client.post(
+            "/api/v1/observability/deployments",
+            json={
+                "org_id": org_id,
+                "deployment_key": f"freshness-{uuid4().hex[:8]}",
+                "name": "Session Freshness Integration",
+                "environment": "prod",
+                "runtime": "integration",
+                "metadata": {"suite": "integration", "contract": "session-freshness"},
+            },
+        )
+        assert deployment_resp.status_code == 201
+        deployment_id = deployment_resp.json()["id"]
+
+        def create_session(agent_id: str, started_at: datetime) -> str:
+            response = client.post(
+                "/api/v1/observability/sessions",
+                json={
+                    "deployment_id": deployment_id,
+                    "agent_id": agent_id,
+                    "started_at": started_at.isoformat(),
+                    "metadata": {"suite": "integration"},
+                },
+            )
+            assert response.status_code == 201
+            session_id = str(response.json()["id"])
+            session_ids.append(session_id)
+            return session_id
+
+        fresh_activity_id = create_session("fresh-explicit-activity", fresh_started_at)
+        fresh_started_fallback_id = create_session("fresh-start-fallback", fresh_started_at)
+        stale_activity_id = create_session("stale-explicit-activity", stale_started_at)
+        stale_started_fallback_id = create_session("stale-start-fallback", stale_started_at)
+
+        far_future = now + timedelta(days=365)
+        future_create_resp = client.post(
+            "/api/v1/observability/sessions",
+            json={
+                "deployment_id": deployment_id,
+                "agent_id": "future-session",
+                "started_at": far_future.isoformat(),
+            },
+        )
+        assert future_create_resp.status_code == 422
+        assert "5 minutes in the future" in future_create_resp.json()["detail"]
+
+        # Exercise COALESCE(last_activity_at, started_at) on both sides of the cutoff.
+        client.portal.call(_clear_activity, fresh_started_fallback_id)
+        client.portal.call(_clear_activity, stale_started_fallback_id)
+
+        # Delayed heartbeats and backfilled action batches must not move the liveness
+        # watermark backward and hide an otherwise live session.
+        fresh_watermark = now - timedelta(minutes=1)
+        heartbeat_resp = client.patch(
+            f"/api/v1/observability/sessions/{fresh_activity_id}",
+            json={"last_activity_at": fresh_watermark.isoformat()},
+        )
+        assert heartbeat_resp.status_code == 200
+        delayed_heartbeat_resp = client.patch(
+            f"/api/v1/observability/sessions/{fresh_activity_id}",
+            json={"last_activity_at": stale_started_at.isoformat()},
+        )
+        assert delayed_heartbeat_resp.status_code == 200
+        future_heartbeat_resp = client.patch(
+            f"/api/v1/observability/sessions/{fresh_activity_id}",
+            json={"last_activity_at": far_future.isoformat()},
+        )
+        assert future_heartbeat_resp.status_code == 422
+        delayed_batch_resp = client.post(
+            "/api/v1/observability/actions/batch",
+            params={"evaluate_policies": "false"},
+            json={
+                "session_id": fresh_activity_id,
+                "events": [
+                    {
+                        "client_event_id": str(uuid4()),
+                        "action_type": "tool_call",
+                        "action_name": "delayed-backfill",
+                        "occurred_at": stale_started_at.isoformat(),
+                        "metadata": {"contract": "monotonic-activity"},
+                    }
+                ],
+            },
+        )
+        assert delayed_batch_resp.status_code == 202
+        future_batch_resp = client.post(
+            "/api/v1/observability/actions/batch",
+            params={"evaluate_policies": "false"},
+            json={
+                "session_id": fresh_activity_id,
+                "events": [
+                    {
+                        "client_event_id": str(uuid4()),
+                        "action_type": "tool_call",
+                        "action_name": "future-event",
+                        "occurred_at": far_future.isoformat(),
+                    }
+                ],
+            },
+        )
+        assert future_batch_resp.status_code == 422
+
+        active_resp = client.get(
+            "/api/v1/observability/sessions/active",
+            params={"org_id": org_id},
+        )
+        assert active_resp.status_code == 200
+        active_payload = active_resp.json()
+        assert {item["id"] for item in active_payload["sessions"]} == {
+            fresh_activity_id,
+            fresh_started_fallback_id,
+        }
+        assert stale_activity_id not in {item["id"] for item in active_payload["sessions"]}
+        assert active_payload["total"] == 2
+        assert active_payload["inactivity_threshold_minutes"] == threshold_minutes
+        assert active_payload["stale_active_sessions_excluded"] == 2
+        fresh_item = next(
+            item for item in active_payload["sessions"] if item["id"] == fresh_activity_id
+        )
+        assert datetime.fromisoformat(fresh_item["last_activity_at"]) == fresh_watermark.replace(
+            tzinfo=None
+        )
+
+        fleet_resp = client.get(
+            "/api/v1/observability/dashboard/fleet",
+            params={
+                "org_id": org_id,
+                "from": (stale_started_at - timedelta(minutes=1)).isoformat(),
+                "to": (now + timedelta(minutes=1)).isoformat(),
+                "granularity": "5m",
+            },
+        )
+        assert fleet_resp.status_code == 200
+        fleet_totals = fleet_resp.json()["totals"]
+        assert fleet_totals["active_sessions"] == 2
+        assert fleet_totals["active_session_inactivity_minutes"] == threshold_minutes
+        assert fleet_totals["stale_active_sessions_excluded"] == 2
+
+        assert client.portal.call(_session_statuses) == [SessionStatus.ACTIVE.value] * 4
+    finally:
+        client.portal.call(_cleanup)
+        if previous_override is None:
+            app.dependency_overrides.pop(get_settings, None)
+        else:
+            app.dependency_overrides[get_settings] = previous_override
