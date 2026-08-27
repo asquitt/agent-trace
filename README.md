@@ -33,7 +33,7 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime-governance
     persistence, tenant-scoped operator APIs, durable scheduler fencing, and fail-closed
     notification persistence
   - operator console `npm test`, TypeScript validation, production build, and npm audit
-    passed (`5 tests`, zero known vulnerabilities)
+    passed (`6 tests`, zero known vulnerabilities)
   - the fail-closed security gate passed against 69 exact hash-locked runtime and build
     dependencies with zero known vulnerabilities
   - the exact-image performance gate passed 284 requests with zero failures after

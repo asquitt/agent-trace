@@ -115,7 +115,7 @@ export type TraceSpan = {
   reasoning_steps: ReasoningStep[];
 };
 
-export type TraceDetail = TraceListItem & {
+export type TraceDetail = Omit<TraceListItem, "span_count"> & {
   idea_id: number | null;
   ranking_id: number | null;
   completed_at: string | null;

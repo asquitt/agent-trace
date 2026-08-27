@@ -73,7 +73,6 @@ describe("operator journey", () => {
       total_input_tokens: 10,
       total_output_tokens: 5,
       estimated_cost_usd: 0.001,
-      span_count: 0,
       tags: [],
       idea_id: null,
       ranking_id: null,

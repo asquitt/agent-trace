@@ -44,10 +44,12 @@ function normalizeActivation(payload: unknown): ActivationStatus {
     pending: "waiting",
     waiting: "waiting",
     onboarding: "waiting",
+    awaiting_telemetry: "waiting",
     degraded: "degraded",
     stale: "degraded",
     inactive: "inactive",
     not_started: "inactive",
+    setup_required: "inactive",
   };
   const state = stateAliases[rawState] ?? (raw.is_active === true ? "active" : "unknown");
 

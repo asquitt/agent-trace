@@ -854,7 +854,7 @@ function TraceDetailView({ trace }: { trace: TraceDetail }) {
   return (
     <article className="detail-layout trace-detail">
       <header className="incident-heading">
-        <div className="incident-heading__meta"><StateBadge value={trace.status} /><span>{trace.span_count} spans</span><span className="mono">{trace.id}</span></div>
+        <div className="incident-heading__meta"><StateBadge value={trace.status} /><span>{trace.spans.length} spans</span><span className="mono">{trace.id}</span></div>
         <p className="eyebrow">Linked trace evidence</p>
         <h1>{readable(trace.trace_type)}</h1>
         <p>Inspect the execution sequence, provider boundaries, and failures captured for this run.</p>

@@ -48,27 +48,53 @@ describe("operator API client", () => {
     expect(headers.get("X-CSRF-Token")).toBe("csrf-token");
   });
 
-  it("normalizes activation response variants at the API boundary", async () => {
+  it("normalizes the backend setup-required activation state", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
         jsonResponse({
-          status: "healthy",
-          deployment_count: 3,
-          session_count: 8,
-          last_event_at: "2026-08-27T17:00:00Z",
-          missing_requirements: [],
+          state: "setup_required",
+          connected_deployments: 0,
+          active_sessions: 0,
+          last_telemetry_at: null,
+          message: "Register a deployment to begin activation.",
+          missing_signals: ["deployment_registration", "agent_telemetry"],
         }),
       ),
     );
 
     await expect(api.activation("northstar")).resolves.toEqual({
-      state: "active",
-      connectedDeployments: 3,
-      activeSessions: 8,
-      lastTelemetryAt: "2026-08-27T17:00:00Z",
-      message: null,
-      missingSignals: [],
+      state: "inactive",
+      connectedDeployments: 0,
+      activeSessions: 0,
+      lastTelemetryAt: null,
+      message: "Register a deployment to begin activation.",
+      missingSignals: ["deployment_registration", "agent_telemetry"],
+    });
+  });
+
+  it("normalizes the backend awaiting-telemetry activation state", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          state: "awaiting_telemetry",
+          connected_deployments: 0,
+          active_sessions: 0,
+          last_telemetry_at: null,
+          message: "Deployment registered; send an action or trace to complete activation.",
+          missing_signals: ["agent_telemetry"],
+        }),
+      ),
+    );
+
+    await expect(api.activation("northstar")).resolves.toEqual({
+      state: "waiting",
+      connectedDeployments: 0,
+      activeSessions: 0,
+      lastTelemetryAt: null,
+      message: "Deployment registered; send an action or trace to complete activation.",
+      missingSignals: ["agent_telemetry"],
     });
   });
 });
