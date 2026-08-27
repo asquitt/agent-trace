@@ -35,6 +35,14 @@ def test_native_push_hook_validates_every_non_delete_ref_by_sha() -> None:
     assert 'install -m 0755 "$ROOT_DIR/.githooks/pre-push"' in installer
 
 
+def test_native_push_hook_reenters_arm64_when_git_runs_under_rosetta() -> None:
+    hook = (ROOT_DIR / ".githooks" / "pre-push").read_text(encoding="utf-8")
+
+    assert "sysctl.proc_translated" in hook
+    assert "LOCAL_CI_NATIVE_REEXEC" in hook
+    assert 'exec /usr/bin/arch -arm64 /bin/bash "$0" "$@"' in hook
+
+
 def test_native_push_hook_processes_multiple_refs_and_ignores_deletes(
     tmp_path: Path,
 ) -> None:

@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Homebrew Git may run under Rosetta on Apple Silicon. Re-enter native arm64 before
+# launching the project toolchain so compiled Python dependencies match the venv.
+if [[ "${LOCAL_CI_NATIVE_REEXEC:-0}" != "1" ]] \
+  && [[ "$(uname -s)" == "Darwin" ]] \
+  && [[ -x /usr/sbin/sysctl ]] \
+  && [[ "$(/usr/sbin/sysctl -in sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
+  export LOCAL_CI_NATIVE_REEXEC=1
+  exec /usr/bin/arch -arm64 /bin/bash "$0" "$@"
+fi
+
 ROOT_DIR="$(git rev-parse --show-toplevel)"
 cd "$ROOT_DIR"
 
