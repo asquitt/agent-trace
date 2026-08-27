@@ -27,6 +27,8 @@ from .observability import (
     PolicyActionType,
     PolicyApprovalStatus,
     PolicyStatus,
+    RuntimeControlRequest,
+    RuntimeControlStatus,
     SessionStatus,
     SystemAuditEvent,
 )
@@ -73,6 +75,8 @@ __all__ = [
     "PolicyActionType",
     "PolicyStatus",
     "PolicyApprovalStatus",
+    "RuntimeControlRequest",
+    "RuntimeControlStatus",
     "AnomalyType",
     "AnomalySeverity",
     "AnomalyStatus",

@@ -152,6 +152,7 @@ def test_gate_passes_only_clean_production_dependency_audit(tmp_path: Path) -> N
         "tests/unit/test_security.py",
         "tests/unit/test_browser_sessions.py",
         "tests/unit/test_console_router.py",
+        "tests/unit/test_runtime_controls.py",
         "tests/unit/test_api_metrics.py",
         "tests/unit/test_observability_api_security.py",
         "tests/unit/test_docker_build_contract.py",

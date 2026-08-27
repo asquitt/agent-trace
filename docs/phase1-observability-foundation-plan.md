@@ -107,12 +107,17 @@
   - memory divergence
   - delegation loop detection
 - Added control/operations endpoints:
+  - `POST /api/v1/runtime-controls/claim`
+  - `POST /api/v1/runtime-controls/{control_id}/ack`
   - `GET /api/v1/observability/budget-policies/events`
   - `POST /api/v1/observability/policies/evaluate`
   - `POST /api/v1/observability/detectors/run`
   - `POST /api/v1/observability/operations/run`
   - `GET /api/v1/observability/operations/status`
   - `GET /api/v1/observability/operations/runs`
+- Added durable provider-neutral runtime delivery with session-scoped leases, hashed
+  lease tokens, approval revalidation for shutdown, idempotent terminal acknowledgement,
+  attempt exhaustion, audit events, and applied shutdown session projection.
   - `GET /api/v1/observability/operations/runs/{run_id}`
   - `GET /api/v1/observability/dashboard/ui`
 - Added optional background operations scheduler:

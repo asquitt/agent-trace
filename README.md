@@ -276,6 +276,23 @@ The background scheduler does not perform outbound delivery. Even when
 `OBSERVABILITY_SCHEDULER_ENABLE_NOTIFICATIONS=true`, it fails closed and records
 `durable_outbox_required`; this flag is reserved until a transactional outbox ships.
 
+## Runtime Control Delivery
+
+Policy breaches persist provider-neutral throttle and shutdown commands in the database.
+Runtimes claim and acknowledge those commands through:
+
+- `POST /api/v1/runtime-controls/claim`
+- `POST /api/v1/runtime-controls/{control_id}/ack`
+
+Delivery is at least once. A stable control ID is the runtime execution idempotency key;
+leases are bounded, raw lease tokens are never persisted, expired leases are redelivered,
+and exact terminal acknowledgements are idempotent. Shutdown is projected as executed only
+after an approved, unexpired request is claimed and the runtime acknowledges it as applied.
+
+Runtime endpoints require an org-scoped `operator` or `admin` API key and reject browser
+sessions. In this version credentials are not deployment-scoped, so operators should issue
+a dedicated org-scoped key per runtime deployment until first-class runtime principals ship.
+
 ## Configuration
 
 Configure with `.env` (see `.env.example`).
@@ -320,6 +337,8 @@ evidence for that profile, not a universal production sizing rule.
 - `OBSERVABILITY_SCHEDULER_RUN_DETECTORS`
 - `OBSERVABILITY_SCHEDULER_RUN_POLICIES`
 - `OBSERVABILITY_SCHEDULER_EXECUTE_POLICY_ACTIONS`
+- `RUNTIME_CONTROL_LEASE_SECONDS`
+- `RUNTIME_CONTROL_MAX_DELIVERY_ATTEMPTS`
 - `OBSERVABILITY_SCHEDULER_ENABLE_NOTIFICATIONS` (reserved; must remain `false`)
 - `OBSERVABILITY_DETECTOR_ANOMALY_DEDUPE_WINDOW_MINUTES`
 - `OBSERVABILITY_DETECTOR_ANOMALY_REOPEN_ACKNOWLEDGED`
@@ -384,7 +403,7 @@ docker build -f docker/Dockerfile .
 - API auth + RBAC + tenant scope enforcement are available and should be enabled in production.
 - Browser sessions store only token hashes, are tenant/role scoped at creation, require
   CSRF validation for unsafe methods, and attribute mutations to the authenticated subject.
-- Shutdown control requests can be approval-gated and audited through policy-approval APIs.
+- Shutdown delivery is approval-gated, lease-bound, runtime-acknowledged, and audited.
 - System-level audit events are persisted and queryable for governance and incident review.
 - SIEM export supports anomaly, policy, operations, and audit bundles for external retention.
 
@@ -392,7 +411,7 @@ docker build -f docker/Dockerfile .
 
 Near-term focus areas:
 
-- Acknowledged runtime adapters for throttle and shutdown delivery
+- First-class deployment-scoped runtime principals and credential lifecycle administration
 - Durable, idempotent scheduled notification delivery
 - Hosted console deployment, public identity, and customer-journey evidence
 - SSO, user provisioning, and API-key lifecycle administration

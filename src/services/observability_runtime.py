@@ -6,9 +6,10 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import case, desc, func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.observability import (
@@ -31,8 +32,10 @@ from ..models.observability import (
     PolicyActionType,
     PolicyApprovalStatus,
     PolicyStatus,
+    RuntimeControlRequest,
     SessionStatus,
 )
+from .runtime_controls import runtime_control_idempotency_key
 from ..utils.time import to_naive_utc, utc_now_naive
 
 
@@ -157,7 +160,7 @@ def _merge_session_metadata(
     control_meta = dict(metadata.get("control", {}))
     control_meta["state"] = "requested"
     control_meta["requested_action"] = action
-    control_meta["delivery_status"] = "pending_runtime_adapter"
+    control_meta["delivery_status"] = "pending"
     control_meta["execution_confirmed"] = False
     control_meta["priority"] = _action_priority(action)
     control_meta["policy_id"] = str(policy.id)
@@ -189,6 +192,8 @@ async def _apply_policy_action(
     execute_actions: bool,
     require_shutdown_approval: bool,
     approval_max_age_minutes: int,
+    period_window_start: datetime | None = None,
+    policy_event_id: UUID | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "policy_id": str(policy.id),
@@ -200,6 +205,7 @@ async def _apply_policy_action(
         "skipped_session_ids": [],
         "approval_required": False,
         "approval_id": None,
+        "control_request_ids": [],
         "execution_confirmed": False,
         "delivery_status": None,
     }
@@ -212,6 +218,7 @@ async def _apply_policy_action(
     skipped_ids: list[str] = []
 
     policy_action = _enum_value(policy.action_on_breach)
+    shutdown_approval: PolicyActionApproval | None = None
     if policy_action == PolicyActionType.SHUTDOWN.value and require_shutdown_approval:
         approval_cutoff = now - timedelta(minutes=max(approval_max_age_minutes, 1))
         approval_query = (
@@ -236,6 +243,7 @@ async def _apply_policy_action(
             result["approval_required"] = True
             return result
         result["approval_id"] = str(approval.id)
+        shutdown_approval = approval
 
     policy_priority = _action_priority(policy_action)
     for session_row in sessions:
@@ -273,12 +281,90 @@ async def _apply_policy_action(
         "policy_name": policy.policy_name,
         "breaches": breaches,
         "request_status": "persisted",
-        "delivery_status": "pending_runtime_adapter",
+        "delivery_status": "pending",
         "execution_confirmed": False,
     }
 
+    control_requests: dict[str, tuple[UUID, str]] = {}
+    if policy_action in {
+        PolicyActionType.THROTTLE.value,
+        PolicyActionType.SHUTDOWN.value,
+    }:
+        authorization_expires_at: datetime | None = None
+        if shutdown_approval is not None:
+            max_age_expiry = shutdown_approval.requested_at + timedelta(
+                minutes=max(approval_max_age_minutes, 1)
+            )
+            authorization_expires_at = min(
+                expiry
+                for expiry in (shutdown_approval.expires_at, max_age_expiry)
+                if expiry is not None
+            )
+        for session_row in sessions:
+            session_id = str(session_row.id)
+            if session_id not in affected_ids:
+                continue
+            request_id = uuid4()
+            idempotency_key = runtime_control_idempotency_key(
+                policy_id=policy.id,
+                session_id=session_row.id,
+                action_type=policy_action,
+                period_window_start=period_window_start or now,
+                policy_updated_at=policy.updated_at,
+                throttle_rate=policy.throttle_rate,
+                approval_id=shutdown_approval.id if shutdown_approval else None,
+            )
+            statement = (
+                pg_insert(RuntimeControlRequest)
+                .values(
+                    id=request_id,
+                    org_id=org_id,
+                    deployment_id=session_row.deployment_id,
+                    session_id=session_row.id,
+                    policy_id=policy.id,
+                    policy_event_id=policy_event_id,
+                    approval_id=shutdown_approval.id if shutdown_approval else None,
+                    authorization_expires_at=authorization_expires_at,
+                    action_type=policy_action,
+                    idempotency_key=idempotency_key,
+                    payload={
+                        "action": policy_action,
+                        "policy_id": str(policy.id),
+                        "policy_name": policy.policy_name,
+                        "session_id": session_id,
+                        "deployment_id": str(session_row.deployment_id),
+                        "throttle_rate": policy.throttle_rate,
+                        "breaches": breaches,
+                        "requested_at": now.isoformat(),
+                    },
+                    status="pending",
+                    priority=_action_priority(policy_action),
+                    available_at=now,
+                    delivery_attempts=0,
+                    acknowledgement_details={},
+                )
+                .on_conflict_do_update(
+                    index_elements=["idempotency_key"],
+                    set_={"idempotency_key": idempotency_key},
+                )
+                .returning(RuntimeControlRequest.id, RuntimeControlRequest.status)
+            )
+            persisted_request_id, persisted_status = (await db.execute(statement)).one()
+            control_requests[session_id] = (persisted_request_id, persisted_status)
+            metadata = dict(session_row.session_metadata or {})
+            control_meta = dict(metadata.get("control", {}))
+            control_meta["request_id"] = str(persisted_request_id)
+            control_meta["state"] = persisted_status
+            control_meta["delivery_status"] = persisted_status
+            control_meta["execution_confirmed"] = persisted_status == "applied"
+            metadata["control"] = control_meta
+            session_row.session_metadata = metadata
+
     if policy_action != PolicyActionType.ALERT.value:
         for session_id in affected_ids:
+            action_metadata = dict(policy_action_metadata)
+            if session_id in control_requests:
+                action_metadata["control_request_id"] = str(control_requests[session_id][0])
             db.add(
                 AgentAction(
                     session_id=UUID(session_id),
@@ -289,11 +375,22 @@ async def _apply_policy_action(
                     model="policy-engine-v1",
                     success=True,
                     occurred_at=now,
-                    action_metadata=policy_action_metadata,
+                    action_metadata=action_metadata,
                 )
             )
-        result["status"] = "requested"
-        result["delivery_status"] = "pending_runtime_adapter"
+        delivery_statuses = [value[1] for value in control_requests.values()]
+        result["status"] = (
+            "already_terminal"
+            if delivery_statuses
+            and all(value in {"applied", "failed"} for value in delivery_statuses)
+            else "requested"
+        )
+        result["delivery_status"] = (
+            delivery_statuses[0]
+            if delivery_statuses and len(set(delivery_statuses)) == 1
+            else "mixed" if delivery_statuses else "not_applicable"
+        )
+        result["control_request_ids"] = [str(value[0]) for value in control_requests.values()]
 
     if policy_action == PolicyActionType.ALERT.value:
         result["status"] = "alert_only"
@@ -458,6 +555,27 @@ async def evaluate_budget_policies(
             summary["results"].append(policy_result)
             continue
 
+        event_rows = [
+            BudgetPolicyEvent(
+                id=uuid4(),
+                policy_id=policy.id,
+                trigger_type=breach["trigger_type"],
+                triggered_at=now,
+                observed_value=breach["observed_value"],
+                threshold_value=breach["threshold_value"],
+                action_executed=policy.action_on_breach,
+                action_status="evaluating",
+                details={
+                    "policy_name": policy.policy_name,
+                    "window_start": window_start.isoformat(),
+                    "window_end": now.isoformat(),
+                },
+            )
+            for breach in breaches
+        ]
+        db.add_all(event_rows)
+        await db.flush()
+        primary_event_id = event_rows[0].id
         action_result = await _apply_policy_action(
             db,
             policy,
@@ -467,6 +585,8 @@ async def evaluate_budget_policies(
             execute_actions,
             require_shutdown_approval,
             approval_max_age_minutes,
+            period_window_start=window_start,
+            policy_event_id=primary_event_id,
         )
         policy_result["action_result"] = action_result
         if action_result["status"] == "requested":
@@ -474,24 +594,14 @@ async def evaluate_budget_policies(
         elif action_result["status"] == "alert_only":
             summary["alerts_triggered"] += 1
 
-        for breach in breaches:
-            db.add(
-                BudgetPolicyEvent(
-                    policy_id=policy.id,
-                    trigger_type=breach["trigger_type"],
-                    triggered_at=now,
-                    observed_value=breach["observed_value"],
-                    threshold_value=breach["threshold_value"],
-                    action_executed=policy.action_on_breach,
-                    action_status=action_result["status"],
-                    details={
-                        "policy_name": policy.policy_name,
-                        "action_result": action_result,
-                        "window_start": window_start.isoformat(),
-                        "window_end": now.isoformat(),
-                    },
-                )
-            )
+        for event_row in event_rows:
+            event_row.action_status = action_result["status"]
+            event_row.details = {
+                "policy_name": policy.policy_name,
+                "action_result": action_result,
+                "window_start": window_start.isoformat(),
+                "window_end": now.isoformat(),
+            }
             summary["events_created"] += 1
 
         summary["results"].append(policy_result)
