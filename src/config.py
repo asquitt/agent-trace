@@ -205,6 +205,19 @@ class Settings(BaseSettings):
             "(org '*' grants global access)"
         ),
     )
+    browser_session_cookie_name: str = Field(default="ai_trace_session", min_length=1)
+    browser_csrf_cookie_name: str = Field(default="ai_trace_csrf", min_length=1)
+    browser_csrf_header: str = Field(default="X-CSRF-Token", min_length=1)
+    browser_session_cookie_secure: bool = Field(
+        default=True,
+        description="Require HTTPS for browser-session and CSRF cookies",
+    )
+    browser_session_ttl_minutes: int = Field(default=480, ge=5, le=10080)
+    operator_console_dist_dir: str = Field(
+        default="web/dist",
+        min_length=1,
+        description="Directory containing the built same-origin operator console",
+    )
     api_rate_limit_enabled: bool = Field(default=False)
     api_rate_limit_requests_per_window: int = Field(default=240, ge=1, le=100000)
     api_rate_limit_window_seconds: int = Field(default=60, ge=1, le=3600)

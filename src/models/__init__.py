@@ -1,5 +1,6 @@
 """Database models."""
 
+from .auth import BrowserSession
 from .base import Base
 from .idea import Idea, IdeaStatus, SourceType
 from .observability import (
@@ -23,8 +24,8 @@ from .observability import (
     ObservabilityOperationRun,
     ObservabilitySchedulerLease,
     PolicyActionApproval,
-    PolicyApprovalStatus,
     PolicyActionType,
+    PolicyApprovalStatus,
     PolicyStatus,
     SessionStatus,
     SystemAuditEvent,
@@ -43,6 +44,7 @@ from .trace import (
 
 __all__ = [
     "Base",
+    "BrowserSession",
     # Idea
     "Idea",
     "IdeaStatus",

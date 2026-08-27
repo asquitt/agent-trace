@@ -43,7 +43,7 @@ class Ranking(Base):
     personal_fit_score: Mapped[float] = mapped_column(Float, nullable=False)
 
     # Weighted overall score
-    overall_score: Mapped[float] = mapped_column(Float, nullable=False, index=True)
+    overall_score: Mapped[float] = mapped_column(Float, nullable=False)
 
     # Recommendation
     recommendation: Mapped[Optional[str]] = mapped_column(Text)

@@ -84,6 +84,22 @@ def test_docker_builds_the_wheel_without_pep517_build_isolation() -> None:
     assert "pip check" in normalized
 
 
+def test_docker_builds_the_locked_console_into_the_runtime_image() -> None:
+    dockerfile = (ROOT_DIR / "docker" / "Dockerfile").read_text(encoding="utf-8")
+    dockerignore = (ROOT_DIR / ".dockerignore").read_text(encoding="utf-8")
+    normalized = " ".join(dockerfile.split())
+
+    assert "ARG NODE_IMAGE=node:" in dockerfile
+    assert "@sha256:" in dockerfile.split("ARG NODE_IMAGE=", 1)[1].splitlines()[0]
+    assert "FROM ${NODE_IMAGE} AS console-builder" in dockerfile
+    assert "COPY web/package.json web/package-lock.json ./" in normalized
+    assert "npm ci --no-audit --no-fund" in normalized
+    assert "npm run build" in normalized
+    assert "COPY --from=console-builder /web/dist ./web/dist" in normalized
+    assert "web/node_modules" in dockerignore
+    assert "web/dist" in dockerignore
+
+
 def test_docker_and_compose_use_the_same_dependency_free_healthcheck() -> None:
     dockerfile = (ROOT_DIR / "docker/Dockerfile").read_text(encoding="utf-8")
     compose = (ROOT_DIR / "docker/docker-compose.yml").read_text(encoding="utf-8")

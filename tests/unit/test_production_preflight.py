@@ -1,14 +1,18 @@
 """Unit tests for production preflight checks."""
 
+from pathlib import Path
+
 from src.config import Settings
 from src.services.production_preflight import run_preflight
 
 
-def test_preflight_flags_missing_hardening_controls() -> None:
+def test_preflight_flags_missing_hardening_controls(tmp_path: Path) -> None:
     settings = Settings(
         api_auth_enabled=False,
         api_keys=[],
         api_require_tenant_header=False,
+        browser_session_cookie_secure=False,
+        operator_console_dist_dir=str(tmp_path / "missing"),
         api_rate_limit_enabled=False,
         observability_shutdown_requires_approval=False,
         observability_scheduler_enabled=True,
@@ -20,18 +24,25 @@ def test_preflight_flags_missing_hardening_controls() -> None:
     assert any("API auth must be enabled" in message for message in failures)
     assert any("At least one API key must be configured" in message for message in failures)
     assert any("Tenant header enforcement" in message for message in failures)
+    assert any("Browser session cookies must require HTTPS" in message for message in failures)
+    assert any("Built operator console assets must exist" in message for message in failures)
     assert any("Rate limiting should be enabled" in message for message in failures)
     assert any("Shutdown actions should require approval" in message for message in failures)
     assert any("Scheduler requires explicit org scope" in message for message in failures)
 
 
-def test_preflight_passes_for_hardened_configuration() -> None:
+def test_preflight_passes_for_hardened_configuration(tmp_path: Path) -> None:
+    console_dist = tmp_path / "console"
+    console_dist.mkdir()
+    (console_dist / "index.html").write_text("<!doctype html>", encoding="utf-8")
     settings = Settings(
         database_url="postgresql+asyncpg://user:pass@db:5432/ai_trace",
         redis_url="redis://redis:6379/0",
         api_auth_enabled=True,
         api_keys=["topsecret:platform-bot:admin:*"],
         api_require_tenant_header=True,
+        browser_session_cookie_secure=True,
+        operator_console_dist_dir=str(console_dist),
         api_rate_limit_enabled=True,
         api_rate_limit_max_keys=5000,
         observability_shutdown_requires_approval=True,
@@ -65,3 +76,11 @@ def test_preflight_rejects_scheduler_notifications_without_durable_outbox() -> N
     failures = [result.message for result in run_preflight(settings) if result.status == "fail"]
 
     assert any("durable outbox delivery" in message for message in failures)
+
+
+def test_preflight_rejects_missing_operator_console(tmp_path: Path) -> None:
+    settings = Settings(operator_console_dist_dir=str(tmp_path / "missing"))
+
+    failures = [result.message for result in run_preflight(settings) if result.status == "fail"]
+
+    assert any("Built operator console assets must exist" in message for message in failures)

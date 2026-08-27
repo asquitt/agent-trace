@@ -1,4 +1,15 @@
 ARG PYTHON_IMAGE=python:3.11.15-slim@sha256:90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff
+ARG NODE_IMAGE=node:22.14.0-alpine3.21@sha256:9bef0ef1e268f60627da9ba7d7605e8831d5b56ad07487d24d1aa386336d1944
+
+FROM ${NODE_IMAGE} AS console-builder
+
+WORKDIR /web
+
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+
+COPY web/ ./
+RUN npm run build
 
 FROM ${PYTHON_IMAGE} AS builder
 
@@ -30,6 +41,7 @@ COPY --from=builder /wheelhouse/ /wheelhouse/
 COPY alembic.ini ./
 COPY alembic/ ./alembic/
 COPY docker/entrypoint.sh /entrypoint.sh
+COPY --from=console-builder /web/dist ./web/dist
 
 RUN chmod +x /entrypoint.sh \
     && pip install --no-deps /wheelhouse/*.whl \

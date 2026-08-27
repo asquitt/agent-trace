@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from ..config import Settings
@@ -34,6 +35,14 @@ def run_preflight(settings: Settings) -> list[CheckResult]:
         _bool_check(
             lambda: settings.api_require_tenant_header,
             "Tenant header enforcement should be enabled (`API_REQUIRE_TENANT_HEADER=true`).",
+        ),
+        _bool_check(
+            lambda: settings.browser_session_cookie_secure,
+            "Browser session cookies must require HTTPS (`BROWSER_SESSION_COOKIE_SECURE=true`).",
+        ),
+        _bool_check(
+            lambda: (Path(settings.operator_console_dist_dir) / "index.html").is_file(),
+            "Built operator console assets must exist (`OPERATOR_CONSOLE_DIST_DIR/index.html`).",
         ),
         _bool_check(
             lambda: settings.api_rate_limit_enabled,

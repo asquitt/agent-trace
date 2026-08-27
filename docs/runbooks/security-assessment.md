@@ -22,10 +22,11 @@ validated:
    `requirements/production.lock` and `requirements/build.lock`, without resolving a new
    graph. Docker consumes these same artifacts. Development extras and unrelated packages
    in the invoking Python environment are not counted as Docker findings.
-3. The authentication, tenant-isolation, global-metrics, and embedded-dashboard
-   security contracts in `tests/unit/test_security.py`, `tests/unit/test_api_metrics.py`,
-   `tests/unit/test_observability_api_security.py`, and
-   `tests/unit/test_docker_build_contract.py`.
+3. The authentication, browser-session/CSRF, same-origin console, tenant-isolation,
+   global-metrics, and Docker security contracts in `tests/unit/test_security.py`,
+   `tests/unit/test_browser_sessions.py`, `tests/unit/test_console_router.py`,
+   `tests/unit/test_api_metrics.py`, `tests/unit/test_observability_api_security.py`,
+   and `tests/unit/test_docker_build_contract.py`.
 
 The dependency audit is evaluated from structured JSON. A command failure, resolution
 failure, missing hash, lock/audit graph mismatch, skipped dependency, malformed output,

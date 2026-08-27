@@ -10,6 +10,12 @@ from src.api.main import app
 from src.database import async_session_factory
 from src.dependencies import get_storage_backend
 from src.models.idea import Idea, SourceType
+from src.models.observability import (
+    AgentDeployment,
+    AgentSession,
+    DeploymentEnvironment,
+    SessionStatus,
+)
 from src.models.trace import SpanStatus, SpanType, TraceStatus, TraceType
 
 
@@ -23,12 +29,17 @@ def client() -> TestClient:
         pytest.skip(f"Trace integration test skipped (infra unavailable): {exc}")
 
 
-def _seed_trace_data(client: TestClient, org_id: str) -> tuple[str, str, int, str]:
+def _seed_trace_data(
+    client: TestClient,
+    org_id: str,
+) -> tuple[str, str, int, str, str, str, str, str, str]:
     """Seed trace rows for integration validation."""
     storage = get_storage_backend()
     primary_trace_id = uuid4()
     failed_trace_id = uuid4()
     primary_correlation_id = uuid4()
+    deployment_id = uuid4()
+    session_id = uuid4()
     span_id = uuid4()
     primary_idea_id = 0
     secondary_idea_id = 0
@@ -55,6 +66,29 @@ def _seed_trace_data(client: TestClient, org_id: str) -> tuple[str, str, int, st
             await session.flush()
             primary_idea_id = int(primary_idea.id)
             secondary_idea_id = int(secondary_idea.id)
+            session.add(
+                AgentDeployment(
+                    id=deployment_id,
+                    org_id=org_id,
+                    deployment_key=f"trace-deployment-{uuid4().hex[:12]}",
+                    name="Trace integration deployment",
+                    environment=DeploymentEnvironment.PROD,
+                    runtime="integration",
+                    is_active=True,
+                    deployment_metadata={"suite": "integration"},
+                )
+            )
+            session.add(
+                AgentSession(
+                    id=session_id,
+                    deployment_id=deployment_id,
+                    agent_id="trace-primary-agent",
+                    status=SessionStatus.ACTIVE,
+                    started_at=now - timedelta(minutes=4),
+                    last_activity_at=now - timedelta(minutes=3),
+                    session_metadata={"suite": "integration"},
+                )
+            )
             await session.commit()
 
         await storage.save_trace(
@@ -64,6 +98,9 @@ def _seed_trace_data(client: TestClient, org_id: str) -> tuple[str, str, int, st
                 "trace_type": TraceType.RANKING.value,
                 "status": TraceStatus.RUNNING.value,
                 "org_id": org_id,
+                "deployment_id": str(deployment_id),
+                "session_id": str(session_id),
+                "agent_id": "trace-primary-agent",
                 "idea_id": primary_idea_id,
                 "started_at": (now - timedelta(minutes=3)).isoformat(),
                 "metadata": {"suite": "integration"},
@@ -148,13 +185,33 @@ def _seed_trace_data(client: TestClient, org_id: str) -> tuple[str, str, int, st
         )
 
     client.portal.call(_seed)
-    return str(primary_trace_id), str(failed_trace_id), primary_idea_id, str(primary_correlation_id)
+    return (
+        str(primary_trace_id),
+        str(failed_trace_id),
+        primary_idea_id,
+        str(primary_correlation_id),
+        str(deployment_id),
+        str(session_id),
+        "trace-primary-agent",
+        (now - timedelta(minutes=4)).isoformat(),
+        (now - timedelta(minutes=2, seconds=30)).isoformat(),
+    )
 
 
 def test_trace_end_to_end_smoke(client: TestClient) -> None:
     """Validate trace list/detail/reasoning/export/metrics flows together."""
     org_id = f"trace-smoke-{uuid4().hex[:8]}"
-    primary_trace_id, failed_trace_id, primary_idea_id, primary_correlation_id = _seed_trace_data(client, org_id)
+    (
+        primary_trace_id,
+        failed_trace_id,
+        primary_idea_id,
+        primary_correlation_id,
+        deployment_id,
+        session_id,
+        agent_id,
+        primary_window_from,
+        primary_window_to,
+    ) = _seed_trace_data(client, org_id)
 
     list_resp = client.get("/api/v1/traces", params={"org_id": org_id, "page_size": 10})
     assert list_resp.status_code == 200
@@ -162,6 +219,36 @@ def test_trace_end_to_end_smoke(client: TestClient) -> None:
     trace_ids = {item["id"] for item in traces}
     assert primary_trace_id in trace_ids
     assert failed_trace_id in trace_ids
+    primary_list_item = next(item for item in traces if item["id"] == primary_trace_id)
+    assert primary_list_item["org_id"] == org_id
+    assert primary_list_item["deployment_id"] == deployment_id
+    assert primary_list_item["session_id"] == session_id
+    assert primary_list_item["agent_id"] == agent_id
+
+    identity_filter_resp = client.get(
+        "/api/v1/traces",
+        params={
+            "org_id": org_id,
+            "deployment_id": deployment_id,
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "from": primary_window_from,
+            "to": primary_window_to,
+        },
+    )
+    assert identity_filter_resp.status_code == 200
+    assert identity_filter_resp.json()["total"] == 1
+    assert identity_filter_resp.json()["traces"][0]["id"] == primary_trace_id
+
+    invalid_window_resp = client.get(
+        "/api/v1/traces",
+        params={
+            "org_id": org_id,
+            "from": "2026-08-27T13:00:00+00:00",
+            "to": "2026-08-27T12:00:00",
+        },
+    )
+    assert invalid_window_resp.status_code == 400
 
     idea_filter_resp = client.get(
         "/api/v1/traces",
@@ -184,6 +271,10 @@ def test_trace_end_to_end_smoke(client: TestClient) -> None:
     detail = detail_resp.json()
     assert detail["id"] == primary_trace_id
     assert detail["status"] == TraceStatus.COMPLETED.value
+    assert detail["org_id"] == org_id
+    assert detail["deployment_id"] == deployment_id
+    assert detail["session_id"] == session_id
+    assert detail["agent_id"] == agent_id
     assert len(detail["spans"]) == 1
     assert detail["spans"][0]["name"] == "integration_span"
     assert detail["spans"][0]["assistant_response"] == "assistant"

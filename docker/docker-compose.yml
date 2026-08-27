@@ -38,6 +38,10 @@ services:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/ai_trace
       - REDIS_URL=redis://redis:6379/0
       - MIGRATE_ON_START=true
+      - API_AUTH_ENABLED=${API_AUTH_ENABLED:-true}
+      - API_REQUIRE_TENANT_HEADER=${API_REQUIRE_TENANT_HEADER:-true}
+      - API_KEYS=${API_KEYS:-replace-me:local-operator:viewer|operator|admin:acme}
+      - BROWSER_SESSION_COOKIE_SECURE=${BROWSER_SESSION_COOKIE_SECURE:-false}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     depends_on:

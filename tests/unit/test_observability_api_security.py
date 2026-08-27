@@ -132,17 +132,16 @@ async def test_operations_status_projects_replica_leadership_health_truthfully(
 
 
 @pytest.mark.asyncio
-async def test_dashboard_is_disabled_for_header_authenticated_production_mode() -> None:
+async def test_dashboard_redirects_for_header_authenticated_production_mode() -> None:
     viewer = _auth(roles={"viewer"}, org_ids={"acme"})
 
-    with pytest.raises(HTTPException) as exc:
-        await dashboard_ui(viewer, Settings(api_auth_enabled=True))
+    response = await dashboard_ui(viewer, Settings(api_auth_enabled=True))
 
-    assert exc.value.status_code == 503
-    assert "browser session authentication" in str(exc.value.detail)
+    assert response.status_code == 307
+    assert response.headers["location"] == "/console/"
 
 
-def test_production_dashboard_route_fails_safely_after_authentication() -> None:
+def test_production_dashboard_route_redirects_to_browser_console_after_authentication() -> None:
     settings = Settings(
         api_auth_enabled=True,
         api_require_tenant_header=True,
@@ -157,11 +156,12 @@ def test_production_dashboard_route_fails_safely_after_authentication() -> None:
         authenticated = client.get(
             "/api/v1/observability/dashboard/ui",
             headers={"X-API-Key": "viewer-key", "X-Org-Id": "acme"},
+            follow_redirects=False,
         )
 
     assert unauthenticated.status_code == 400
-    assert authenticated.status_code == 503
-    assert "browser session authentication" in authenticated.json()["detail"]
+    assert authenticated.status_code == 307
+    assert authenticated.headers["location"] == "/console/"
 
 
 @pytest.mark.asyncio
