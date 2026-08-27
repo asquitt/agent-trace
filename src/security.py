@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Iterable
 
 from fastapi import HTTPException, Request, status
 
@@ -150,6 +150,15 @@ def require_roles(auth: AuthContext, *roles: str) -> None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Requires one of roles: {sorted(required)}",
+        )
+
+
+def require_global_admin(auth: AuthContext) -> None:
+    """Require a globally scoped administrator for cross-tenant operations."""
+    if not auth.is_global_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Global administrator access required",
         )
 
 

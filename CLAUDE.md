@@ -89,7 +89,7 @@ uvicorn src.api.main:app --reload
 
 ## Architecture
 
-**Agent Fleet Observability**: Real-time monitoring, anomaly detection, policy enforcement, and governance audit for production AI agent fleets.
+**Agent Fleet Observability**: Real-time monitoring, anomaly detection, policy evaluation, durable control requests, and governance audit for production AI agent fleets.
 
 ```
 src/
@@ -170,12 +170,13 @@ alembic upgrade head                    # Run migrations
 
 ### Policy Actions
 - `alert` → notify via webhook/Slack/PagerDuty
-- `throttle` → rate-limit session
+- `throttle` → persist a control request for a future runtime adapter
 - `approve` → require human approval
-- `shutdown` → terminate agent session (approval-gated)
+- `shutdown` → persist an approval-gated control request for a future runtime adapter
 
 ### Observability Runtime
-- Background scheduler loop checks anomalies, evaluates policies, executes actions
+- Background scheduler loop checks anomalies, evaluates policies, and persists auditable control requests
+- No runtime actuator is currently wired; throttle and shutdown requests remain pending until an adapter confirms execution
 - Persistent operation run logs for audit
 
 ### Auth & Tenant Isolation

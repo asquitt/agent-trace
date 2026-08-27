@@ -1,6 +1,6 @@
 # Secret Rotation Runbook
 
-Last updated: February 14, 2026
+Last updated: August 27, 2026
 
 ## Scope
 
@@ -29,7 +29,9 @@ Rotates all AI Trace production secrets without downtime.
 ## Validation
 
 - `/health/ready` returns 200 after rollout.
-- `/metrics` scheduler health is `healthy` or expected non-`degraded` state.
+- An authenticated `/metrics` request made with the separately rotated global
+  monitoring credential reports scheduler health as `healthy` or the expected
+  non-`degraded` state.
 - Notification delivery smoke test succeeds.
 - Authenticated API requests succeed with newly rotated keys.
 

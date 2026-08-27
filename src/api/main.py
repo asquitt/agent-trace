@@ -14,15 +14,15 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from ..config import get_settings
-from ..database import async_session_factory
-from ..database import close_db, init_db
+from ..database import async_session_factory, close_db, init_db
+from ..dependencies import AuthDep
 from ..rate_limit import InMemoryRateLimiter
-from ..services import ObservabilityOperationsScheduler
+from ..security import require_global_admin
+from ..services import ObservabilityOperationsScheduler, public_scheduler_status
 from .routers import observability_router, traces_router
 
 logger = structlog.get_logger(__name__)
 settings = get_settings()
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -166,35 +166,15 @@ async def health_ready() -> JSONResponse:
 
 
 @app.get("/metrics")
-async def get_metrics(request: Request) -> dict[str, Any]:
-    """Simple JSON metrics endpoint for uptime and request telemetry."""
+async def get_metrics(request: Request, auth: AuthDep) -> dict[str, Any]:
+    """Return cross-tenant operational metrics to global administrators."""
+    require_global_admin(auth)
     metrics = request.app.state.request_metrics
     uptime_seconds = int(time.time() - request.app.state.started_at)
     total = int(metrics["total_requests"])
     avg_duration = float(metrics["total_duration_ms"] / total) if total else 0.0
     scheduler = getattr(request.app.state, "observability_scheduler", None)
-    if scheduler is None:
-        scheduler_snapshot: dict[str, Any] = {
-            "enabled": False,
-            "running": False,
-            "health": "disabled",
-            "failed_orgs": 0,
-            "org_count": 0,
-        }
-    else:
-        scheduler_snapshot = scheduler.status()
-        tick_failures = scheduler_snapshot.get("last_tick_failures") or []
-        if not scheduler_snapshot.get("enabled"):
-            health = "disabled"
-        elif not scheduler_snapshot.get("running"):
-            health = "stopped"
-        elif tick_failures:
-            health = "degraded"
-        else:
-            health = "healthy"
-        scheduler_snapshot["health"] = health
-        scheduler_snapshot["failed_orgs"] = len(tick_failures)
-        scheduler_snapshot["org_count"] = len(scheduler_snapshot.get("org_ids", []))
+    scheduler_snapshot = public_scheduler_status(scheduler)
     return {
         "service": settings.service_name,
         "uptime_seconds": uptime_seconds,

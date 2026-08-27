@@ -2,6 +2,7 @@
 
 from collections import defaultdict
 from datetime import datetime, timedelta
+from secrets import token_urlsafe
 from typing import Any, Optional, TypedDict, overload
 from uuid import UUID, uuid4
 
@@ -32,19 +33,14 @@ from ...models.observability import (
     MemorySnapshot,
     ObservabilityOperationRun,
     PolicyActionApproval,
-    PolicyApprovalStatus,
     PolicyActionType,
+    PolicyApprovalStatus,
     PolicyStatus,
     SessionStatus,
     SystemAuditEvent,
 )
-from ...models.trace import AITrace
-from ...security import AuthContext, require_org_access, require_roles
-from ...services.observability_runtime import (
-    DetectorConfig,
-    evaluate_budget_policies,
-    run_anomaly_detectors,
-)
+from ...models.trace import AITrace, AITraceSpan
+from ...security import AuthContext, require_global_admin, require_org_access, require_roles
 from ...services.notifications import (
     classify_notification_targets,
     merge_runtime_notification_targets,
@@ -54,6 +50,12 @@ from ...services.notifications import (
     runtime_notification_gate_result,
     send_runtime_notifications,
 )
+from ...services.observability_runtime import (
+    DetectorConfig,
+    evaluate_budget_policies,
+    run_anomaly_detectors,
+)
+from ...services.operations_scheduler import public_scheduler_status
 from ...utils.time import to_naive_utc, utc_now_iso, utc_now_naive
 
 router = APIRouter(prefix="/api/v1/observability", tags=["observability"])
@@ -205,6 +207,37 @@ def _normalize_bucket(dt: datetime, granularity: str) -> datetime:
     return dt.replace(minute=minute, second=0, microsecond=0)
 
 
+def _active_session_cutoff(now: datetime, inactivity_minutes: int) -> datetime:
+    """Return the inclusive activity cutoff used by every active-session projection."""
+    return now - timedelta(minutes=inactivity_minutes)
+
+
+def _monotonic_activity_watermark(
+    *,
+    started_at: datetime,
+    current: Optional[datetime],
+    candidate: datetime,
+) -> datetime:
+    """Advance activity time without letting delayed events move the watermark backward."""
+    return max(started_at, current or started_at, candidate)
+
+
+def _recent_active_session_filters(cutoff: datetime) -> list[Any]:
+    """Return SQL predicates for ACTIVE sessions with a recent heartbeat or start."""
+    return [
+        AgentSession.status == SessionStatus.ACTIVE.value,
+        func.coalesce(AgentSession.last_activity_at, AgentSession.started_at) >= cutoff,
+    ]
+
+
+def _stale_active_session_filters(cutoff: datetime) -> list[Any]:
+    """Return SQL predicates for ACTIVE rows excluded by the inactivity contract."""
+    return [
+        AgentSession.status == SessionStatus.ACTIVE.value,
+        func.coalesce(AgentSession.last_activity_at, AgentSession.started_at) < cutoff,
+    ]
+
+
 async def _action_window_metrics(
     session: AsyncSession,
     *,
@@ -276,6 +309,144 @@ def _require_admin(auth: AuthContext) -> None:
 
 def _enforce_org_scope(auth: AuthContext, org_id: str) -> None:
     require_org_access(auth, org_id)
+
+
+async def _deployment_org_id(
+    session: AsyncSession,
+    deployment_id: UUID,
+    *,
+    resource_name: str = "Deployment",
+) -> str:
+    deployment = await session.get(AgentDeployment, deployment_id)
+    if deployment is None:
+        raise HTTPException(status_code=404, detail=f"{resource_name} not found")
+    return deployment.org_id
+
+
+async def _session_org_id(
+    session: AsyncSession,
+    session_id: UUID,
+    *,
+    resource_name: str = "Session",
+) -> str:
+    session_row = await session.get(AgentSession, session_id)
+    if session_row is None:
+        raise HTTPException(status_code=404, detail=f"{resource_name} not found")
+    return await _deployment_org_id(
+        session,
+        session_row.deployment_id,
+        resource_name=f"{resource_name} deployment",
+    )
+
+
+async def _trace_org_id(
+    session: AsyncSession,
+    trace_id: UUID,
+    *,
+    resource_name: str = "Trace",
+) -> tuple[AITrace, str | None]:
+    trace = await session.get(AITrace, trace_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail=f"{resource_name} not found")
+
+    linked_org_id: str | None = None
+    if trace.session_id is not None:
+        linked_org_id = await _session_org_id(
+            session,
+            trace.session_id,
+            resource_name=f"{resource_name} session",
+        )
+    elif trace.deployment_id is not None:
+        linked_org_id = await _deployment_org_id(
+            session,
+            trace.deployment_id,
+            resource_name=f"{resource_name} deployment",
+        )
+
+    if trace.org_id and linked_org_id and trace.org_id != linked_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"{resource_name} has inconsistent tenant ownership",
+        )
+    return trace, trace.org_id or linked_org_id
+
+
+async def _require_trace_org(
+    session: AsyncSession,
+    trace_id: UUID,
+    expected_org_id: str,
+    *,
+    resource_name: str = "Trace",
+) -> AITrace:
+    trace, trace_org_id = await _trace_org_id(
+        session,
+        trace_id,
+        resource_name=resource_name,
+    )
+    if trace_org_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{resource_name} is not tenant scoped",
+        )
+    if trace_org_id != expected_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{resource_name} must belong to org_id={expected_org_id}",
+        )
+    return trace
+
+
+async def _require_action_org(
+    session: AsyncSession,
+    action_id: UUID,
+    expected_org_id: str,
+    *,
+    resource_name: str = "Action",
+) -> AgentAction:
+    action = await session.get(AgentAction, action_id)
+    if action is None:
+        raise HTTPException(status_code=404, detail=f"{resource_name} not found")
+    action_org_id = await _session_org_id(
+        session,
+        action.session_id,
+        resource_name=f"{resource_name} session",
+    )
+    if action_org_id != expected_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{resource_name} must belong to org_id={expected_org_id}",
+        )
+    return action
+
+
+async def _require_span_org(
+    session: AsyncSession,
+    span_id: UUID,
+    expected_org_id: str,
+    *,
+    resource_name: str = "Span",
+) -> AITraceSpan:
+    span = await session.get(AITraceSpan, span_id)
+    if span is None:
+        raise HTTPException(status_code=404, detail=f"{resource_name} not found")
+    await _require_trace_org(
+        session,
+        span.trace_id,
+        expected_org_id,
+        resource_name=f"{resource_name} trace",
+    )
+    if span.session_id is not None:
+        span_org_id = await _session_org_id(
+            session,
+            span.session_id,
+            resource_name=f"{resource_name} session",
+        )
+        if span_org_id != expected_org_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"{resource_name} has inconsistent tenant ownership",
+            )
+    return span
 
 
 def _request_id(request: Optional[Request]) -> Optional[str]:
@@ -492,6 +663,8 @@ class ActiveSessionListResponse(BaseModel):
     page: int
     page_size: int
     has_more: bool
+    inactivity_threshold_minutes: int = 30
+    stale_active_sessions_excluded: int = 0
 
 
 class ActionEventRequest(BaseModel):
@@ -839,6 +1012,8 @@ class FleetTotals(BaseModel):
     total_cost_usd: float
     total_input_tokens: int
     total_output_tokens: int
+    active_session_inactivity_minutes: int = 30
+    stale_active_sessions_excluded: int = 0
 
 
 class FleetDashboardResponse(BaseModel):
@@ -1279,6 +1454,25 @@ async def create_session(
             raise HTTPException(status_code=404, detail="Deployment not found")
         _enforce_org_scope(auth, deployment.org_id)
 
+        if payload.parent_session_id is not None:
+            parent_org_id = await _session_org_id(
+                session,
+                payload.parent_session_id,
+                resource_name="Parent session",
+            )
+            if parent_org_id != deployment.org_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Parent session must belong to the deployment org",
+                )
+        if payload.root_trace_id is not None:
+            await _require_trace_org(
+                session,
+                payload.root_trace_id,
+                deployment.org_id,
+                resource_name="Root trace",
+            )
+
         session_row = AgentSession(
             deployment_id=payload.deployment_id,
             agent_id=payload.agent_id,
@@ -1323,7 +1517,12 @@ async def update_session(
         if payload.error_message is not None:
             session_row.error_message = payload.error_message
         if payload.last_activity_at is not None:
-            session_row.last_activity_at = _to_db_datetime(payload.last_activity_at)
+            activity_candidate = _to_db_datetime(payload.last_activity_at)
+            session_row.last_activity_at = _monotonic_activity_watermark(
+                started_at=session_row.started_at,
+                current=session_row.last_activity_at,
+                candidate=activity_candidate,
+            )
 
         if session_row.ended_at is not None:
             session_row.duration_ms = int(
@@ -1338,6 +1537,7 @@ async def update_session(
 @router.get("/sessions/active", response_model=ActiveSessionListResponse)
 async def list_active_sessions(
     storage: StorageDep,
+    settings: SettingsDep,
     auth: AuthDep,
     org_id: str = Query(...),
     deployment_id: Optional[UUID] = Query(None),
@@ -1349,6 +1549,10 @@ async def list_active_sessions(
     _enforce_org_scope(auth, org_id)
     offset = (page - 1) * page_size
     now = utc_now_naive()
+    inactivity_minutes = settings.observability_active_session_inactivity_minutes
+    activity_cutoff = _active_session_cutoff(now, inactivity_minutes)
+    recent_filters = _recent_active_session_filters(activity_cutoff)
+    stale_filters = _stale_active_session_filters(activity_cutoff)
 
     async with storage.session_factory() as session:
         base = (
@@ -1356,25 +1560,25 @@ async def list_active_sessions(
             .join(AgentDeployment, AgentSession.deployment_id == AgentDeployment.id)
             .where(
                 AgentDeployment.org_id == org_id,
-                AgentSession.status == SessionStatus.ACTIVE.value,
+                *recent_filters,
             )
             .order_by(AgentSession.started_at.desc())
         )
-        count_q = (
-            select(func.count(AgentSession.id))
-            .join(AgentDeployment, AgentSession.deployment_id == AgentDeployment.id)
-            .where(
-                AgentDeployment.org_id == org_id,
-                AgentSession.status == SessionStatus.ACTIVE.value,
+        counts_q = (
+            select(
+                func.count(AgentSession.id).filter(*recent_filters),
+                func.count(AgentSession.id).filter(*stale_filters),
             )
+            .join(AgentDeployment, AgentSession.deployment_id == AgentDeployment.id)
+            .where(AgentDeployment.org_id == org_id)
         )
 
         if deployment_id:
             base = base.where(AgentSession.deployment_id == deployment_id)
-            count_q = count_q.where(AgentSession.deployment_id == deployment_id)
+            counts_q = counts_q.where(AgentSession.deployment_id == deployment_id)
         if agent_id:
             base = base.where(AgentSession.agent_id == agent_id)
-            count_q = count_q.where(AgentSession.agent_id == agent_id)
+            counts_q = counts_q.where(AgentSession.agent_id == agent_id)
 
         result = await session.execute(base.limit(page_size + 1).offset(offset))
         rows = list(result.scalars().all())
@@ -1418,8 +1622,9 @@ async def list_active_sessions(
                     "resource": action_row[4],
                 }
 
-        total_result = await session.execute(count_q)
-        total = int(total_result.scalar() or 0)
+        counts = (await session.execute(counts_q)).one()
+        total = int(counts[0] or 0)
+        stale_total = int(counts[1] or 0)
 
         sessions = []
         for row in rows:
@@ -1447,6 +1652,8 @@ async def list_active_sessions(
             page=page,
             page_size=page_size,
             has_more=has_more,
+            inactivity_threshold_minutes=inactivity_minutes,
+            stale_active_sessions_excluded=stale_total,
         )
 
 
@@ -1467,6 +1674,39 @@ async def ingest_action_batch(
         if deployment is None:
             raise HTTPException(status_code=404, detail="Deployment not found")
         _enforce_org_scope(auth, deployment.org_id)
+
+        for trace_id in {event.trace_id for event in payload.events if event.trace_id is not None}:
+            await _require_trace_org(
+                session,
+                trace_id,
+                deployment.org_id,
+                resource_name="Action trace",
+            )
+
+        spans_by_id: dict[UUID, AITraceSpan] = {}
+        for span_id in {event.span_id for event in payload.events if event.span_id is not None}:
+            spans_by_id[span_id] = await _require_span_org(
+                session,
+                span_id,
+                deployment.org_id,
+                resource_name="Action span",
+            )
+
+        for event in payload.events:
+            if event.span_id is not None:
+                span = spans_by_id[event.span_id]
+                if span.session_id is not None and span.session_id != payload.session_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Action span must belong to action session",
+                    )
+            if event.trace_id is not None and event.span_id is not None:
+                span = spans_by_id[event.span_id]
+                if span.trace_id != event.trace_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Action span must belong to action trace",
+                    )
 
         existing_client_ids: set[UUID] = set()
         incoming_client_ids = [e.client_event_id for e in payload.events if e.client_event_id is not None]
@@ -1523,7 +1763,11 @@ async def ingest_action_batch(
                 latest_event = occurred_at
 
         if latest_event:
-            session_row.last_activity_at = latest_event
+            session_row.last_activity_at = _monotonic_activity_watermark(
+                started_at=session_row.started_at,
+                current=session_row.last_activity_at,
+                candidate=latest_event,
+            )
 
         policy_evaluation: Optional[dict[str, Any]] = None
         if evaluate_policies_flag:
@@ -1570,13 +1814,29 @@ async def create_delegation(
             )
         _enforce_org_scope(auth, parent_deployment.org_id)
         if payload.trace_id:
-            trace = await session.get(AITrace, payload.trace_id)
-            if not trace:
-                raise HTTPException(status_code=404, detail="Trace not found")
+            await _require_trace_org(
+                session,
+                payload.trace_id,
+                parent_deployment.org_id,
+                resource_name="Delegation trace",
+            )
         if payload.parent_action_id:
-            action = await session.get(AgentAction, payload.parent_action_id)
-            if not action:
-                raise HTTPException(status_code=404, detail="Parent action not found")
+            action = await _require_action_org(
+                session,
+                payload.parent_action_id,
+                parent_deployment.org_id,
+                resource_name="Parent action",
+            )
+            if action.session_id != parent.id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Parent action must belong to parent session",
+                )
+            if payload.trace_id and action.trace_id and action.trace_id != payload.trace_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Parent action trace must match delegation trace",
+                )
 
         row = DelegationEdge(
             trace_id=payload.trace_id,
@@ -1628,6 +1888,14 @@ async def ingest_memory_snapshots(
         if deployment is None:
             raise HTTPException(status_code=404, detail="Deployment not found")
         _enforce_org_scope(auth, deployment.org_id)
+
+        for trace_id in {snap.trace_id for snap in payload.snapshots if snap.trace_id is not None}:
+            await _require_trace_org(
+                session,
+                trace_id,
+                deployment.org_id,
+                resource_name="Memory snapshot trace",
+            )
 
         accepted = 0
         rejected = 0
@@ -1681,6 +1949,17 @@ async def create_budget_policy(
             raise HTTPException(status_code=400, detail="deployment_id required for deployment scope")
         if payload.scope_type == BudgetScopeType.AGENT and not payload.agent_id:
             raise HTTPException(status_code=400, detail="agent_id required for agent scope")
+        if payload.deployment_id is not None:
+            deployment_org_id = await _deployment_org_id(
+                session,
+                payload.deployment_id,
+                resource_name="Policy deployment",
+            )
+            if deployment_org_id != payload.org_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Policy deployment must belong to policy org",
+                )
 
         row = BudgetPolicy(
             org_id=payload.org_id,
@@ -2118,7 +2397,9 @@ async def simulate_policies(
                 first_breach_at = evaluated_at
             last_breach_at = evaluated_at
         total_events_projected += int(summary.get("events_created", 0))
-        total_actions_projected += int(summary.get("actions_executed", 0))
+        total_actions_projected += int(summary.get("actions_executed", 0)) + int(
+            summary.get("actions_requested", 0)
+        )
         for result in summary.get("results", []):
             if result.get("breaches"):
                 breached_policy_ids.add(str(result.get("policy_id")))
@@ -2137,6 +2418,7 @@ async def simulate_policies(
         "clean_steps": max(len(runs) - breached_steps, 0),
         "total_events_projected": total_events_projected,
         "total_actions_projected": total_actions_projected,
+        "total_control_requests_projected": total_actions_projected,
         "unique_breached_policy_ids": sorted(breached_policy_ids),
         "first_breach_at": first_breach_at,
         "last_breach_at": last_breach_at,
@@ -2211,6 +2493,48 @@ async def create_anomaly(
         if deployment is None:
             raise HTTPException(status_code=404, detail="Deployment not found")
         _enforce_org_scope(auth, deployment.org_id)
+
+        if payload.session_id is not None:
+            session_org_id = await _session_org_id(
+                session,
+                payload.session_id,
+                resource_name="Anomaly session",
+            )
+            if session_org_id != deployment.org_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Anomaly session must belong to anomaly deployment org",
+                )
+            session_row = await session.get(AgentSession, payload.session_id)
+            if session_row is None or session_row.deployment_id != deployment.id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Anomaly session must belong to anomaly deployment",
+                )
+        if payload.trace_id is not None:
+            await _require_trace_org(
+                session,
+                payload.trace_id,
+                deployment.org_id,
+                resource_name="Anomaly trace",
+            )
+        if payload.action_id is not None:
+            action = await _require_action_org(
+                session,
+                payload.action_id,
+                deployment.org_id,
+                resource_name="Anomaly action",
+            )
+            if payload.session_id is not None and action.session_id != payload.session_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Anomaly action must belong to anomaly session",
+                )
+            if payload.trace_id is not None and action.trace_id and action.trace_id != payload.trace_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Anomaly action trace must match anomaly trace",
+                )
 
         row = AnomalyEvent(
             deployment_id=deployment_id,
@@ -2712,31 +3036,9 @@ async def run_operations_cycle(
 
 @router.get("/operations/status", response_model=RuntimeOperationsStatusResponse)
 async def get_operations_status(request: Request, auth: AuthDep) -> RuntimeOperationsStatusResponse:
-    _require_viewer(auth)
+    require_global_admin(auth)
     scheduler = getattr(request.app.state, "observability_scheduler", None)
-    if scheduler is None:
-        return RuntimeOperationsStatusResponse(
-            scheduler={
-                "enabled": False,
-                "running": False,
-                "health": "disabled",
-                "reason": "scheduler_not_initialized",
-            }
-        )
-    scheduler_state = scheduler.status()
-    tick_failures = scheduler_state.get("last_tick_failures") or []
-    if not scheduler_state.get("enabled"):
-        health = "disabled"
-    elif not scheduler_state.get("running"):
-        health = "stopped"
-    elif tick_failures:
-        health = "degraded"
-    else:
-        health = "healthy"
-    scheduler_state["health"] = health
-    scheduler_state["failed_orgs"] = len(tick_failures)
-    scheduler_state["org_count"] = len(scheduler_state.get("org_ids", []))
-    return RuntimeOperationsStatusResponse(scheduler=scheduler_state)
+    return RuntimeOperationsStatusResponse(scheduler=public_scheduler_status(scheduler))
 
 
 @router.get("/operations/runs", response_model=OperationRunListResponse)
@@ -3109,6 +3411,7 @@ async def export_siem_events(
 @router.get("/dashboard/fleet", response_model=FleetDashboardResponse)
 async def get_fleet_dashboard(
     storage: StorageDep,
+    settings: SettingsDep,
     auth: AuthDep,
     org_id: str = Query(...),
     deployment_id: Optional[UUID] = Query(None),
@@ -3120,6 +3423,10 @@ async def get_fleet_dashboard(
     _enforce_org_scope(auth, org_id)
     from_time = _to_db_datetime(from_time)
     to_time = _to_db_datetime(to_time)
+    inactivity_minutes = settings.observability_active_session_inactivity_minutes
+    activity_cutoff = _active_session_cutoff(utc_now_naive(), inactivity_minutes)
+    recent_active_filters = _recent_active_session_filters(activity_cutoff)
+    stale_active_filters = _stale_active_session_filters(activity_cutoff)
 
     async with storage.session_factory() as session:
         action_filters = [
@@ -3128,6 +3435,16 @@ async def get_fleet_dashboard(
             AgentDeployment.org_id == org_id,
         ]
         if deployment_id:
+            deployment_org_id = await _deployment_org_id(
+                session,
+                deployment_id,
+                resource_name="Fleet dashboard deployment",
+            )
+            if deployment_org_id != org_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Deployment not found",
+                )
             action_filters.append(AgentSession.deployment_id == deployment_id)
 
         totals_q = (
@@ -3149,17 +3466,21 @@ async def get_fleet_dashboard(
         total_input_tokens = int(totals_row[3] or 0)
         total_output_tokens = int(totals_row[4] or 0)
 
-        active_sessions_q = (
-            select(func.count(AgentSession.id))
-            .join(AgentDeployment, AgentSession.deployment_id == AgentDeployment.id)
-            .where(
-                AgentDeployment.org_id == org_id,
-                AgentSession.status == SessionStatus.ACTIVE.value,
+        active_session_counts_q = (
+            select(
+                func.count(AgentSession.id).filter(*recent_active_filters),
+                func.count(AgentSession.id).filter(*stale_active_filters),
             )
+            .join(AgentDeployment, AgentSession.deployment_id == AgentDeployment.id)
+            .where(AgentDeployment.org_id == org_id)
         )
         if deployment_id:
-            active_sessions_q = active_sessions_q.where(AgentSession.deployment_id == deployment_id)
-        active_sessions = int((await session.execute(active_sessions_q)).scalar() or 0)
+            active_session_counts_q = active_session_counts_q.where(
+                AgentSession.deployment_id == deployment_id
+            )
+        active_session_counts = (await session.execute(active_session_counts_q)).one()
+        active_sessions = int(active_session_counts[0] or 0)
+        stale_active_sessions = int(active_session_counts[1] or 0)
 
         series_q = (
             select(
@@ -3263,6 +3584,8 @@ async def get_fleet_dashboard(
                 total_cost_usd=total_cost,
                 total_input_tokens=total_input_tokens,
                 total_output_tokens=total_output_tokens,
+                active_session_inactivity_minutes=inactivity_minutes,
+                stale_active_sessions_excluded=stale_active_sessions,
             ),
             timeseries=timeseries,
             top_agents=top_agents,
@@ -3292,6 +3615,16 @@ async def get_cost_summary(
             AgentDeployment.org_id == org_id,
         ]
         if deployment_id:
+            deployment_org_id = await _deployment_org_id(
+                session,
+                deployment_id,
+                resource_name="Cost summary deployment",
+            )
+            if deployment_org_id != org_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Deployment not found",
+                )
             action_filters.append(AgentSession.deployment_id == deployment_id)
         if agent_id:
             action_filters.append(AgentSession.agent_id == agent_id)
@@ -3347,7 +3680,9 @@ async def get_cost_summary(
                 scope_cost_q = (
                     select(func.sum(AgentAction.estimated_cost_usd))
                     .join(AgentSession, AgentAction.session_id == AgentSession.id)
+                    .join(AgentDeployment, AgentSession.deployment_id == AgentDeployment.id)
                     .where(
+                        AgentDeployment.org_id == org_id,
                         AgentSession.deployment_id == policy.deployment_id,
                         AgentAction.occurred_at >= from_time,
                         AgentAction.occurred_at <= to_time,
@@ -3358,7 +3693,9 @@ async def get_cost_summary(
                 scope_cost_q = (
                     select(func.sum(AgentAction.estimated_cost_usd))
                     .join(AgentSession, AgentAction.session_id == AgentSession.id)
+                    .join(AgentDeployment, AgentSession.deployment_id == AgentDeployment.id)
                     .where(
+                        AgentDeployment.org_id == org_id,
                         AgentSession.agent_id == policy.agent_id,
                         AgentAction.occurred_at >= from_time,
                         AgentAction.occurred_at <= to_time,
@@ -3628,9 +3965,17 @@ async def get_delegation_chain(
 ) -> DelegationChainResponse:
     _require_viewer(auth)
     async with storage.session_factory() as session:
-        trace = await session.get(AITrace, trace_id)
-        if trace and trace.org_id:
-            _enforce_org_scope(auth, trace.org_id)
+        trace, trace_org_id = await _trace_org_id(
+            session,
+            trace_id,
+            resource_name="Delegation trace",
+        )
+        if trace_org_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Delegation trace is not tenant scoped",
+            )
+        _enforce_org_scope(auth, trace_org_id)
         edge_q = select(DelegationEdge).where(DelegationEdge.trace_id == trace_id).order_by(
             DelegationEdge.started_at.asc()
         )
@@ -3641,15 +3986,29 @@ async def get_delegation_chain(
             session_ids.add(edge.parent_session_id)
             session_ids.add(edge.child_session_id)
 
-        if not session_ids:
-            if trace and trace.session_id:
-                session_ids.add(trace.session_id)
+        if not session_ids and trace.session_id:
+            session_ids.add(trace.session_id)
 
         sessions_by_id: dict[UUID, AgentSession] = {}
         if session_ids:
-            session_q = select(AgentSession).where(AgentSession.id.in_(session_ids))
-            sessions = list((await session.execute(session_q)).scalars().all())
-            sessions_by_id = {row.id: row for row in sessions}
+            session_q = (
+                select(AgentSession, AgentDeployment.org_id)
+                .join(AgentDeployment, AgentSession.deployment_id == AgentDeployment.id)
+                .where(AgentSession.id.in_(session_ids))
+            )
+            session_rows = list((await session.execute(session_q)).all())
+            if len(session_rows) != len(session_ids):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Delegation chain references a missing session",
+                )
+            for session_row, session_org_id in session_rows:
+                if session_org_id != trace_org_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Delegation chain has inconsistent tenant ownership",
+                    )
+                sessions_by_id[session_row.id] = session_row
 
         node_list: list[dict[str, Any]] = []
         for row in sessions_by_id.values():
@@ -3687,7 +4046,7 @@ async def get_delegation_chain(
             adjacency[edge.parent_session_id].append(edge.child_session_id)
             children.add(edge.child_session_id)
 
-        roots = [node for node in adjacency.keys() if node not in children]
+        roots = [node for node in adjacency if node not in children]
         if not roots and adjacency:
             roots = [next(iter(adjacency.keys()))]
 
@@ -3721,16 +4080,26 @@ async def get_delegation_chain(
 
 
 @router.get("/dashboard/ui", response_class=HTMLResponse)
-async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
+async def dashboard_ui(auth: AuthDep, settings: SettingsDep) -> HTMLResponse:
     """Simple built-in dashboard for runtime observability inspection."""
     _require_viewer(auth)
+    if settings.api_auth_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "The built-in dashboard is disabled when header-based API authentication "
+                "is enabled. Use authenticated API clients until browser session "
+                "authentication is configured."
+            ),
+        )
+    csp_nonce = token_urlsafe(18)
     html = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AI Trace Observability Console</title>
-  <style>
+  <style nonce="__CSP_NONCE__">
     :root {
       --bg: #f3f6f8;
       --panel: #ffffff;
@@ -3767,6 +4136,17 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
       gap: 8px;
       align-items: center;
       flex-wrap: wrap;
+    }
+    .visually-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
     }
     input, button {
       border: 1px solid var(--border);
@@ -3876,7 +4256,8 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
         <p>Fleet, sessions, anomalies, and budget control loop in one view</p>
       </div>
       <div class="controls">
-        <input id="orgId" placeholder="org_id (required)" />
+        <label for="orgId" class="visually-hidden">Organization ID</label>
+        <input id="orgId" name="org_id" placeholder="org_id (required)" required />
         <button id="refreshBtn">Refresh</button>
         <button id="detectBtn" class="secondary">Run Detectors</button>
       </div>
@@ -3935,7 +4316,7 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
     </div>
   </div>
 
-  <script>
+  <script nonce="__CSP_NONCE__">
     const byId = (id) => document.getElementById(id);
     let latestDetectorResult = {};
 
@@ -3997,27 +4378,41 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
       await refresh();
     }
 
+    function appendListMessage(el, message, className) {
+      const li = document.createElement("li");
+      li.className = className;
+      li.textContent = message;
+      el.appendChild(li);
+    }
+
     function renderTopAgents(items) {
       const el = byId("topAgents");
-      el.innerHTML = "";
+      el.replaceChildren();
       if (!items.length) {
-        el.innerHTML = '<li class="muted">No agent activity in window</li>';
+        appendListMessage(el, "No agent activity in window", "muted");
         return;
       }
       for (const row of items) {
         const li = document.createElement("li");
-        li.innerHTML =
-          "<span>" + row.agent_id + "</span>" +
-          "<span><span class='tag'>" + row.action_count + " actions</span> " + formatUsd(row.total_cost_usd) + "</span>";
+        const agent = document.createElement("span");
+        agent.textContent = String(row.agent_id || "unknown agent");
+        const summary = document.createElement("span");
+        const count = document.createElement("span");
+        count.className = "tag";
+        count.textContent = String(row.action_count || 0) + " actions";
+        summary.appendChild(count);
+        summary.appendChild(document.createTextNode(" " + formatUsd(row.total_cost_usd)));
+        li.appendChild(agent);
+        li.appendChild(summary);
         el.appendChild(li);
       }
     }
 
     function renderActiveSessions(items) {
       const el = byId("activeSessionFeed");
-      el.innerHTML = "";
+      el.replaceChildren();
       if (!items.length) {
-        el.innerHTML = '<li class="muted">No active sessions right now</li>';
+        appendListMessage(el, "No active sessions right now", "muted");
         return;
       }
       for (const row of items.slice(0, 10)) {
@@ -4025,18 +4420,28 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
         const latest = row.latest_action_name
           ? row.latest_action_name + (row.latest_action_resource ? " (" + row.latest_action_resource + ")" : "")
           : "No action yet";
-        li.innerHTML =
-          "<span>" + row.agent_id + " <span class='muted'>(" + latest + ")</span></span>" +
-          "<span><span class='tag'>" + formatElapsed(row.elapsed_ms) + "</span></span>";
+        const agent = document.createElement("span");
+        agent.appendChild(document.createTextNode(String(row.agent_id || "unknown agent") + " "));
+        const latestAction = document.createElement("span");
+        latestAction.className = "muted";
+        latestAction.textContent = "(" + latest + ")";
+        agent.appendChild(latestAction);
+        const elapsed = document.createElement("span");
+        const elapsedTag = document.createElement("span");
+        elapsedTag.className = "tag";
+        elapsedTag.textContent = formatElapsed(row.elapsed_ms);
+        elapsed.appendChild(elapsedTag);
+        li.appendChild(agent);
+        li.appendChild(elapsed);
         el.appendChild(li);
       }
     }
 
     function renderAnomalyGroups(items) {
       const el = byId("anomalyGroupList");
-      el.innerHTML = "";
+      el.replaceChildren();
       if (!items.length) {
-        el.innerHTML = '<li class="ok">No anomalies in selected window</li>';
+        appendListMessage(el, "No anomalies in selected window", "ok");
         return;
       }
       for (const row of items.slice(0, 10)) {
@@ -4046,7 +4451,6 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
             ? "critical"
             : (row.representative_severity === "high" ? "warning" : "muted");
         const volume = row.total_occurrences || row.anomaly_count;
-        li.innerHTML = "";
         const left = document.createElement("span");
         left.textContent = row.title;
         const right = document.createElement("span");
@@ -4080,7 +4484,7 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
 
     function renderRiskSignals(risk) {
       const el = byId("riskSignals");
-      el.innerHTML = "";
+      el.replaceChildren();
       const signals = (risk && risk.signals) || [];
       if (!signals.length) {
         const li = document.createElement("li");
@@ -4091,34 +4495,49 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
           (actionPct == null ? "n/a" : (actionPct * 100).toFixed(1) + "%") +
           ", Cost " +
           (costPct == null ? "n/a" : (costPct * 100).toFixed(1) + "%");
-        li.innerHTML = "<span class='ok'>No active risk signals</span><span class='muted'>" + summary + "</span>";
+        const message = document.createElement("span");
+        message.className = "ok";
+        message.textContent = "No active risk signals";
+        const details = document.createElement("span");
+        details.className = "muted";
+        details.textContent = summary;
+        li.appendChild(message);
+        li.appendChild(details);
         el.appendChild(li);
         return;
       }
       for (const row of signals.slice(0, 10)) {
         const li = document.createElement("li");
         const sevClass = row.severity === "high" ? "critical" : "warning";
-        li.innerHTML =
-          "<span>" + row.code + "</span>" +
-          "<span class='" + sevClass + "'>" + row.severity + "</span>";
+        const code = document.createElement("span");
+        code.textContent = String(row.code || "unknown");
+        const severity = document.createElement("span");
+        severity.className = sevClass;
+        severity.textContent = String(row.severity || "unknown");
+        li.appendChild(code);
+        li.appendChild(severity);
         el.appendChild(li);
       }
     }
 
     function renderBudgets(items) {
       const el = byId("budgetList");
-      el.innerHTML = "";
+      el.replaceChildren();
       if (!items.length) {
-        el.innerHTML = '<li class="muted">No budget policies configured</li>';
+        appendListMessage(el, "No budget policies configured", "muted");
         return;
       }
       for (const row of items.slice(0, 10)) {
         const util = row.utilization == null ? "n/a" : (row.utilization * 100).toFixed(1) + "%";
         const cls = row.utilization != null && row.utilization >= 1 ? "critical" : "ok";
         const li = document.createElement("li");
-        li.innerHTML =
-          "<span>" + row.policy_name + "</span>" +
-          "<span class='" + cls + "'>" + util + "</span>";
+        const name = document.createElement("span");
+        name.textContent = String(row.policy_name || "unnamed policy");
+        const utilization = document.createElement("span");
+        utilization.className = cls;
+        utilization.textContent = util;
+        li.appendChild(name);
+        li.appendChild(utilization);
         el.appendChild(li);
       }
     }
@@ -4177,5 +4596,16 @@ async def dashboard_ui(auth: AuthDep) -> HTMLResponse:
     setInterval(() => refresh().catch(() => {}), 15000);
   </script>
 </body>
-</html>"""
-    return HTMLResponse(content=html)
+</html>""".replace("__CSP_NONCE__", csp_nonce)
+    response = HTMLResponse(content=html)
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'none'; "
+        f"script-src 'nonce-{csp_nonce}'; "
+        f"style-src 'nonce-{csp_nonce}'; "
+        "connect-src 'self'; img-src 'self'; base-uri 'none'; "
+        "form-action 'self'; frame-ancestors 'none'"
+    )
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    return response

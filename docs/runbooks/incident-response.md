@@ -1,6 +1,6 @@
 # Incident Response Runbook
 
-Last updated: February 14, 2026
+Last updated: August 27, 2026
 
 ## Severity Levels
 
@@ -15,7 +15,7 @@ Last updated: February 14, 2026
 3. Verify health endpoints:
    - `/health/live`
    - `/health/ready`
-   - `/metrics`
+   - `/metrics` using the global operational monitoring credential
 4. Check alerts from `deploy/monitoring/prometheus-rules.yaml`.
 5. Decide mitigation path:
    - rollback deployment

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Optional
+from contextlib import suppress
+from typing import Any, Protocol
 
 import structlog
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, async_sessionmaker
 
 from ..config import Settings
 from ..models.observability import ObservabilityOperationRun, SystemAuditEvent
@@ -27,21 +29,235 @@ from .observability_runtime import (
 
 logger = structlog.get_logger(__name__)
 
+# A stable, application-specific signed bigint used for the PostgreSQL session lock.
+# Keeping the lock global to this database guarantees one scheduler leader across
+# every API replica without requiring a coordination table or schema migration.
+_SCHEDULER_ADVISORY_LOCK_ID = 0x4149545241434501
+_LEADERSHIP_RETRY_SECONDS = 5.0
+
+_PUBLIC_SCHEDULER_STATUS_KEYS = (
+    "enabled",
+    "running",
+    "is_leader",
+    "leadership_state",
+    "last_leadership_change_at",
+    "last_leadership_error",
+    "last_tick_at",
+    "last_success_at",
+    "last_error",
+    "interval_seconds",
+    "org_count",
+    "failed_orgs",
+)
+
+
+def public_scheduler_status(scheduler: Any) -> dict[str, Any]:
+    """Return aggregate scheduler health without tenant identifiers."""
+    if scheduler is None:
+        return {
+            "enabled": False,
+            "running": False,
+            "is_leader": False,
+            "leadership_state": "disabled",
+            "last_leadership_change_at": None,
+            "last_leadership_error": None,
+            "last_tick_at": None,
+            "last_success_at": None,
+            "last_error": None,
+            "interval_seconds": None,
+            "org_count": 0,
+            "failed_orgs": 0,
+            "health": "disabled",
+            "reason": "scheduler_not_initialized",
+        }
+
+    raw = scheduler.status()
+    result = {key: raw.get(key) for key in _PUBLIC_SCHEDULER_STATUS_KEYS}
+    result["org_count"] = int(result.get("org_count") or 0)
+    result["failed_orgs"] = int(result.get("failed_orgs") or 0)
+    if not result.get("enabled"):
+        health = "disabled"
+    elif not result.get("running"):
+        health = "stopped"
+    elif result.get("leadership_state") == "standby":
+        health = "standby"
+    elif result.get("leadership_state") == "contending":
+        health = "contending"
+    elif result.get("leadership_state") == "error":
+        health = "error"
+    elif (
+        result.get("leadership_state") != "leader"
+        or not result.get("is_leader")
+        or result["failed_orgs"] > 0
+    ):
+        health = "degraded"
+    else:
+        health = "healthy"
+    result["health"] = health
+    return result
+
+
+class SchedulerLeadershipLock(Protocol):
+    """Coordination contract used by the scheduler and deterministic tests."""
+
+    async def try_acquire(self) -> bool:
+        """Attempt to become leader without blocking."""
+        ...
+
+    async def verify(self) -> bool:
+        """Return whether the held leadership connection is still usable."""
+        ...
+
+    async def release(self) -> None:
+        """Release leadership and its dedicated connection."""
+        ...
+
+
+class PostgresAdvisoryLeadershipLock:
+    """Hold scheduler leadership on a dedicated PostgreSQL connection."""
+
+    def __init__(self, engine: AsyncEngine, lock_id: int = _SCHEDULER_ADVISORY_LOCK_ID) -> None:
+        self._engine = engine
+        self._lock_id = lock_id
+        self._connection: AsyncConnection | None = None
+
+    async def try_acquire(self) -> bool:
+        """Try to acquire the session lock, retaining the connection on success."""
+        if self._connection is not None:
+            return await self.verify()
+
+        connection = await self._engine.connect()
+        lock_result_known = False
+        acquired = False
+        try:
+            result = await connection.execute(
+                text("SELECT pg_try_advisory_lock(:lock_id)"),
+                {"lock_id": self._lock_id},
+            )
+            acquired = bool(result.scalar_one())
+            lock_result_known = True
+            # End the implicit transaction. The session-level advisory lock remains
+            # held because this AsyncConnection stays checked out until release().
+            await connection.commit()
+            if acquired:
+                self._connection = connection
+                return True
+        except BaseException as exc:
+            if lock_result_known and not acquired:
+                await connection.close()
+            else:
+                await self._invalidate_connection(connection, exc)
+            raise
+
+        await connection.close()
+        return False
+
+    async def verify(self) -> bool:
+        """Check that the dedicated connection holding the session lock is alive."""
+        connection = self._connection
+        if connection is None:
+            return False
+        try:
+            await connection.execute(text("SELECT 1"))
+            await connection.commit()
+        except BaseException as exc:
+            self._connection = None
+            await self._invalidate_connection(connection, exc)
+            raise
+        return True
+
+    async def release(self) -> None:
+        """Unlock normally, or invalidate the DBAPI session when unlock is uncertain."""
+        connection = self._connection
+        self._connection = None
+        if connection is None:
+            return
+        try:
+            result = await connection.execute(
+                text("SELECT pg_advisory_unlock(:lock_id)"),
+                {"lock_id": self._lock_id},
+            )
+            released = bool(result.scalar_one())
+            if not released:
+                raise RuntimeError("scheduler advisory lock was not held by its connection")
+            await connection.commit()
+        except asyncio.CancelledError as exc:
+            # Never let cancellation return a session that may still own a
+            # session-level advisory lock to the pool.
+            await self._invalidate_connection(connection, exc)
+            raise
+        except Exception as exc:
+            await self._invalidate_connection(connection, exc)
+            logger.exception("observability_scheduler_leadership_release_failed")
+            return
+
+        try:
+            await connection.close()
+        except asyncio.CancelledError as exc:
+            # The unlock committed, but invalidate anyway rather than allowing
+            # cancellation during close to leave ambiguous pooled state.
+            await self._invalidate_connection(connection, exc)
+            raise
+        except Exception as exc:
+            await self._invalidate_connection(connection, exc)
+            logger.exception("observability_scheduler_leadership_close_failed")
+
+    @staticmethod
+    async def _invalidate_connection(
+        connection: AsyncConnection,
+        cause: BaseException,
+    ) -> None:
+        """Terminate an uncertain DBAPI session without returning it as reusable."""
+        try:
+            # Shield pool invalidation from the cancellation that caused cleanup.
+            # SQLAlchemy discards the DBAPI connection even if termination reports
+            # an error, so it cannot retain the advisory lock in the pool.
+            await asyncio.shield(connection.invalidate(cause))
+        except asyncio.CancelledError:
+            # A second cancellation may interrupt this wait, but the shielded
+            # invalidation continues and still prevents pool reuse.
+            logger.warning("observability_scheduler_leadership_invalidation_cancelled")
+            raise
+        except Exception:
+            # Do not call close() if invalidation itself could not begin: returning
+            # an uncertain session to the pool would be less safe than leaking it.
+            logger.exception("observability_scheduler_leadership_invalidation_failed")
+            return
+
+        # After invalidation, close only finalizes the facade; the DBAPI session
+        # has already been terminated/discarded and cannot be pooled.
+        with suppress(Exception):
+            await asyncio.shield(connection.close())
+
 
 class ObservabilityOperationsScheduler:
-    """Periodic scheduler for detectors and policy enforcement."""
+    """Periodic scheduler for detectors, policy evaluation, and control requests."""
 
     def __init__(
         self,
         session_factory: async_sessionmaker,
         settings: Settings,
+        *,
+        leadership_lock: SchedulerLeadershipLock | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
-        self._task: Optional[asyncio.Task] = None
+        if leadership_lock is None:
+            bind = session_factory.kw.get("bind")
+            if not isinstance(bind, AsyncEngine):
+                raise TypeError("scheduler session factory must be bound to an AsyncEngine")
+            leadership_lock = PostgresAdvisoryLeadershipLock(bind)
+        self._leadership_lock = leadership_lock
+        self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._state: dict[str, Any] = {
             "running": False,
+            "is_leader": False,
+            "leadership_state": (
+                "stopped" if settings.observability_scheduler_enabled else "disabled"
+            ),
+            "last_leadership_change_at": None,
+            "last_leadership_error": None,
             "last_tick_at": None,
             "last_success_at": None,
             "last_error": None,
@@ -62,6 +278,7 @@ class ObservabilityOperationsScheduler:
 
         self._stop.clear()
         self._state["running"] = True
+        self._set_leadership_state("contending")
         self._task = asyncio.create_task(self._run_loop(), name="observability-ops-scheduler")
         logger.info(
             "observability_scheduler_started",
@@ -74,21 +291,66 @@ class ObservabilityOperationsScheduler:
         self._stop.set()
         if self._task is not None:
             self._task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
+        await self._leadership_lock.release()
         self._task = None
         self._state["running"] = False
+        self._set_leadership_state(
+            "stopped" if self._settings.observability_scheduler_enabled else "disabled"
+        )
         logger.info("observability_scheduler_stopped")
 
     def status(self) -> dict[str, Any]:
-        """Get scheduler runtime status."""
-        state = dict(self._state)
-        state["interval_seconds"] = self._settings.observability_scheduler_interval_seconds
-        state["enabled"] = self._settings.observability_scheduler_enabled
-        state["org_ids"] = list(self._settings.observability_scheduler_org_ids)
-        return state
+        """Get a public-safe scheduler status without tenant identifiers."""
+        return {
+            "enabled": self._settings.observability_scheduler_enabled,
+            "running": self._state["running"],
+            "is_leader": self._state["is_leader"],
+            "leadership_state": self._state["leadership_state"],
+            "last_leadership_change_at": self._state["last_leadership_change_at"],
+            "last_leadership_error": self._state["last_leadership_error"],
+            "last_tick_at": self._state["last_tick_at"],
+            "last_success_at": self._state["last_success_at"],
+            "last_error": self._state["last_error"],
+            "interval_seconds": self._settings.observability_scheduler_interval_seconds,
+            "org_count": len(self._settings.observability_scheduler_org_ids),
+            "failed_orgs": len(self._state["last_tick_failures"]),
+        }
+
+    def _set_leadership_state(self, state: str, *, error: str | None = None) -> None:
+        if self._state["leadership_state"] != state:
+            self._state["last_leadership_change_at"] = utc_now_iso()
+        self._state["leadership_state"] = state
+        self._state["is_leader"] = state == "leader"
+        self._state["last_leadership_error"] = error
+
+    async def _ensure_leadership(self) -> bool:
+        """Acquire or verify scheduler leadership, failing safely on DB errors."""
+        try:
+            if self._state["is_leader"]:
+                if await self._leadership_lock.verify():
+                    return True
+                self._set_leadership_state("contending")
+
+            if await self._leadership_lock.try_acquire():
+                self._set_leadership_state("leader")
+                logger.info("observability_scheduler_leadership_acquired")
+                return True
+
+            self._set_leadership_state("standby")
+            return False
+        except Exception as exc:  # pragma: no cover - exact driver errors vary
+            self._set_leadership_state("error", error="leadership_lock_unavailable")
+            logger.exception(
+                "observability_scheduler_leadership_error",
+                error=str(exc),
+            )
+            return False
+
+    async def _wait(self, timeout: float) -> None:
+        with suppress(TimeoutError):
+            await asyncio.wait_for(self._stop.wait(), timeout=timeout)
 
     async def _start_run_row(self, org_id: str) -> str:
         async with self._session_factory() as session:
@@ -101,8 +363,12 @@ class ObservabilityOperationsScheduler:
                     "source": "scheduler",
                     "run_detectors": self._settings.observability_scheduler_run_detectors,
                     "run_policies": self._settings.observability_scheduler_run_policies,
-                    "execute_policy_actions": self._settings.observability_scheduler_execute_policy_actions,
-                    "notifications_enabled": self._settings.observability_scheduler_enable_notifications,
+                    "execute_policy_actions": (
+                        self._settings.observability_scheduler_execute_policy_actions
+                    ),
+                    "notifications_enabled": (
+                        self._settings.observability_scheduler_enable_notifications
+                    ),
                 },
             )
             session.add(row)
@@ -119,7 +385,7 @@ class ObservabilityOperationsScheduler:
         detector_summary: dict[str, Any],
         policy_summary: dict[str, Any],
         notification_summary: dict[str, Any],
-        error_message: Optional[str] = None,
+        error_message: str | None = None,
     ) -> None:
         async with self._session_factory() as session:
             row = await session.get(ObservabilityOperationRun, run_id)
@@ -274,42 +540,57 @@ class ObservabilityOperationsScheduler:
         }
 
     async def _run_loop(self) -> None:
-        while not self._stop.is_set():
-            self._state["last_tick_at"] = utc_now_iso()
-            tick_failures: list[dict[str, str]] = []
-            successful_runs = 0
-            for org_id in self._settings.observability_scheduler_org_ids:
-                try:
-                    await self.run_once(org_id)
-                    successful_runs += 1
-                    org_state = self._state["org_runs"].setdefault(org_id, {})
-                    org_state["last_error"] = None
-                except Exception as exc:  # pragma: no cover - runtime infrastructure dependent
-                    error_message = str(exc)
-                    tick_failures.append({"org_id": org_id, "error": error_message})
-                    org_state = self._state["org_runs"].setdefault(org_id, {})
-                    org_state["last_error"] = error_message
-                    org_state["last_failed_at"] = utc_now_iso()
-                    logger.exception(
-                        "observability_scheduler_org_run_failed",
-                        org_id=org_id,
-                        error=error_message,
+        try:
+            while not self._stop.is_set():
+                if not await self._ensure_leadership():
+                    await self._wait(
+                        min(
+                            float(self._settings.observability_scheduler_interval_seconds),
+                            _LEADERSHIP_RETRY_SECONDS,
+                        )
                     )
+                    continue
 
-            if successful_runs > 0:
-                self._state["last_success_at"] = utc_now_iso()
+                self._state["last_tick_at"] = utc_now_iso()
+                tick_failures: list[dict[str, str]] = []
+                successful_runs = 0
+                leadership_lost = False
+                for org_id in self._settings.observability_scheduler_org_ids:
+                    # Verify the dedicated lock connection between tenant runs. If it
+                    # has failed, stop this cycle before another replica takes over.
+                    if not await self._ensure_leadership():
+                        leadership_lost = True
+                        break
+                    try:
+                        await self.run_once(org_id)
+                        successful_runs += 1
+                        org_state = self._state["org_runs"].setdefault(org_id, {})
+                        org_state["last_error"] = None
+                    except Exception as exc:  # pragma: no cover - infrastructure dependent
+                        error_message = str(exc)
+                        tick_failures.append({"org_id": org_id, "error": error_message})
+                        org_state = self._state["org_runs"].setdefault(org_id, {})
+                        org_state["last_error"] = error_message
+                        org_state["last_failed_at"] = utc_now_iso()
+                        logger.exception(
+                            "observability_scheduler_org_run_failed",
+                            org_id=org_id,
+                            error=error_message,
+                        )
 
-            if tick_failures:
-                self._state["last_error"] = f"{len(tick_failures)} org run(s) failed"
+                if successful_runs > 0:
+                    self._state["last_success_at"] = utc_now_iso()
+
+                if leadership_lost:
+                    self._state["last_error"] = "scheduler leadership lost during tick"
+                elif tick_failures:
+                    self._state["last_error"] = f"{len(tick_failures)} org run(s) failed"
+                else:
+                    self._state["last_error"] = None
                 self._state["last_tick_failures"] = tick_failures
-            else:
-                self._state["last_error"] = None
-                self._state["last_tick_failures"] = []
 
-            try:
-                await asyncio.wait_for(
-                    self._stop.wait(),
-                    timeout=self._settings.observability_scheduler_interval_seconds,
-                )
-            except asyncio.TimeoutError:
-                continue
+                await self._wait(float(self._settings.observability_scheduler_interval_seconds))
+        finally:
+            await self._leadership_lock.release()
+            if self._state["running"]:
+                self._set_leadership_state("stopped")

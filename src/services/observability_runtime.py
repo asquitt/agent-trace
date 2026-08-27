@@ -1,4 +1,4 @@
-"""Runtime policy enforcement and anomaly detector services."""
+"""Runtime policy evaluation, control-request, and anomaly detector services."""
 
 from __future__ import annotations
 
@@ -27,8 +27,8 @@ from ..models.observability import (
     DelegationEdge,
     MemoryConsistencyState,
     MemorySnapshot,
-    PolicyActionType,
     PolicyActionApproval,
+    PolicyActionType,
     PolicyApprovalStatus,
     PolicyStatus,
     SessionStatus,
@@ -155,7 +155,10 @@ def _merge_session_metadata(
 ) -> None:
     metadata = dict(session_row.session_metadata or {})
     control_meta = dict(metadata.get("control", {}))
-    control_meta["state"] = action
+    control_meta["state"] = "requested"
+    control_meta["requested_action"] = action
+    control_meta["delivery_status"] = "pending_runtime_adapter"
+    control_meta["execution_confirmed"] = False
     control_meta["priority"] = _action_priority(action)
     control_meta["policy_id"] = str(policy.id)
     control_meta["policy_name"] = policy.policy_name
@@ -171,9 +174,9 @@ def _merge_session_metadata(
 def _policy_action_name(action: str) -> str:
     return {
         PolicyActionType.ALERT.value: "policy_alert",
-        PolicyActionType.THROTTLE.value: "policy_throttle",
-        PolicyActionType.REQUIRE_APPROVAL.value: "policy_require_approval",
-        PolicyActionType.SHUTDOWN.value: "policy_shutdown",
+        PolicyActionType.THROTTLE.value: "policy_throttle_requested",
+        PolicyActionType.REQUIRE_APPROVAL.value: "policy_require_approval_requested",
+        PolicyActionType.SHUTDOWN.value: "policy_shutdown_requested",
     }[action]
 
 
@@ -197,6 +200,8 @@ async def _apply_policy_action(
         "skipped_session_ids": [],
         "approval_required": False,
         "approval_id": None,
+        "execution_confirmed": False,
+        "delivery_status": None,
     }
     if not execute_actions:
         result["status"] = "dry_run"
@@ -241,27 +246,10 @@ async def _apply_policy_action(
             continue
 
         metadata_extra = {"breaches": breaches}
-        if policy_action == PolicyActionType.SHUTDOWN.value:
-            session_row.status = SessionStatus.TERMINATED
-            if session_row.ended_at is None:
-                session_row.ended_at = now
-            session_row.duration_ms = int(
-                (session_row.ended_at - session_row.started_at).total_seconds() * 1000
-            )
-            if not session_row.error_message:
-                session_row.error_message = (
-                    f"Auto-terminated by budget policy {policy.policy_name}"
-                )
-            _merge_session_metadata(
-                session_row,
-                policy_action,
-                policy,
-                now,
-                extra=metadata_extra,
-            )
-            affected_ids.append(str(session_row.id))
-        elif policy_action == PolicyActionType.THROTTLE.value:
-            session_row.status = SessionStatus.IDLE
+        if policy_action in {
+            PolicyActionType.SHUTDOWN.value,
+            PolicyActionType.THROTTLE.value,
+        }:
             _merge_session_metadata(
                 session_row,
                 policy_action,
@@ -271,7 +259,6 @@ async def _apply_policy_action(
             )
             affected_ids.append(str(session_row.id))
         elif policy_action == PolicyActionType.REQUIRE_APPROVAL.value:
-            session_row.status = SessionStatus.IDLE
             _merge_session_metadata(
                 session_row,
                 policy_action,
@@ -285,6 +272,9 @@ async def _apply_policy_action(
         "policy_id": str(policy.id),
         "policy_name": policy.policy_name,
         "breaches": breaches,
+        "request_status": "persisted",
+        "delivery_status": "pending_runtime_adapter",
+        "execution_confirmed": False,
     }
 
     if policy_action != PolicyActionType.ALERT.value:
@@ -302,7 +292,8 @@ async def _apply_policy_action(
                     action_metadata=policy_action_metadata,
                 )
             )
-        result["status"] = "executed"
+        result["status"] = "requested"
+        result["delivery_status"] = "pending_runtime_adapter"
 
     if policy_action == PolicyActionType.ALERT.value:
         result["status"] = "alert_only"
@@ -321,7 +312,7 @@ async def evaluate_budget_policies(
     require_shutdown_approval: bool = False,
     approval_max_age_minutes: int = 60,
 ) -> dict[str, Any]:
-    """Evaluate budget policies and execute configured controls."""
+    """Evaluate budget policies and persist configured control requests."""
     now = ensure_naive_utc(as_of) or utc_now_naive()
     policies_query = select(BudgetPolicy).where(
         BudgetPolicy.org_id == org_id,
@@ -336,6 +327,8 @@ async def evaluate_budget_policies(
         "breached_policies": 0,
         "events_created": 0,
         "actions_executed": 0,
+        "actions_requested": 0,
+        "alerts_triggered": 0,
         "results": [],
     }
 
@@ -476,8 +469,10 @@ async def evaluate_budget_policies(
             approval_max_age_minutes,
         )
         policy_result["action_result"] = action_result
-        if action_result["status"] in {"executed", "alert_only"}:
-            summary["actions_executed"] += 1
+        if action_result["status"] == "requested":
+            summary["actions_requested"] += 1
+        elif action_result["status"] == "alert_only":
+            summary["alerts_triggered"] += 1
 
         for breach in breaches:
             db.add(
@@ -1089,7 +1084,7 @@ def _find_cycles(edges: list[tuple[UUID, UUID]]) -> list[list[UUID]]:
         if node in visiting:
             if node in stack:
                 idx = stack.index(node)
-                cycles.append(stack[idx:] + [node])
+                cycles.append([*stack[idx:], node])
             return
         if node in visited:
             return

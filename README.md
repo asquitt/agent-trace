@@ -1,17 +1,20 @@
 # AI Trace
 
-Agent observability and runtime governance platform for production AI-agent fleets.
+Agent observability and runtime-governance backend for AI-agent fleets.
 
-AI Trace extends trace capture into an operational control plane: monitor multi-agent behavior, detect anomalies, enforce budget and safety policies, and maintain audit trails for every intervention.
+AI Trace extends trace capture toward an operational control plane: monitor multi-agent
+behavior, detect anomalies, evaluate budget and safety policies, persist control
+requests, and maintain governance audit trails.
 
 ## Why AI Trace
 
-Most LLM observability tools stop at telemetry. AI Trace adds runtime controls:
+Most LLM observability tools stop at telemetry. AI Trace adds runtime-governance primitives:
 
 - Fleet/session visibility across deployments
 - Real-time anomaly detection with deduplication and grouped triage
 - Bulk grouped anomaly triage actions (acknowledge/resolve by fingerprint)
-- Budget policy enforcement with runtime actions (`alert`, `throttle`, `require_approval`, `shutdown`)
+- Budget policy evaluation with persisted control requests (`alert`, `throttle`,
+  `require_approval`, `shutdown`)
 - Memory consistency monitoring across distributed sessions
 - Multi-agent delegation chain tracing
 - Continuous operations loop (manual + scheduler) with persistent run logs
@@ -20,16 +23,25 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime controls:
 ## Current Product Status
 
 - Version: `0.2.0`
-- Maturity: `Production Candidate`
-- Last validated: February 14, 2026 (UTC)
-- Validation snapshot:
-  - `ruff check --select F .` passed
+- Maturity: `Backend Beta / Product Alpha`
+- Release posture: not production-ready
+- Last code validation: August 27, 2026 (UTC)
+- Current validation snapshot:
+  - `ruff check --select F src tests` passed
   - `pyright` passed (`0 errors`)
-  - `pytest -q` passed (`60 passed`)
-  - `./scripts/run_full_e2e.sh` passed (`60 passed`, migration replay, double test pass)
-  - `./scripts/run_perf_gate.sh` passed (`docs/reports/perf/perf-gate-20260214T194058Z.json`)
-  - `./scripts/backup_restore_drill.sh` passed (`docs/reports/dr/backup-restore-drill-20260214T194129Z.json`)
-  - `./scripts/security_gate.sh` passed (`docs/reports/security/security-gate-20260214T194129Z.json`)
+  - `pytest -q tests/unit` passed (`115 passed`)
+  - `pytest -q -o addopts='' tests/integration` passed (`3 passed`) against clean PostgreSQL
+  - the fail-closed security gate passed against 69 exact hash-locked runtime and build
+    dependencies with zero known vulnerabilities
+- Release blockers:
+  - production browser session authentication and the product frontend are not built
+  - runtime `shutdown`/`throttle` delivery and agent acknowledgement are not implemented;
+    current controls are persisted requests and audit records only
+  - the latest scheduled [Production Gates run](https://github.com/asquitt/agent-trace/actions/runs/31377820684)
+    is red on fleet-dashboard latency
+  - retained February 14 E2E, performance, DR, and security reports are historical
+    evidence, not validation of the current release candidate; the old security report
+    is specifically invalid because its permissive threshold allowed a non-zero audit
 
 ## Production Gate Automation
 
@@ -44,15 +56,15 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime controls:
 
 | Capability | Status | Primary Endpoints |
 |---|---|---|
-| Fleet observability across deployments | Shipped | `GET /api/v1/observability/dashboard/fleet`, `GET /api/v1/observability/dashboard/ui` |
+| Fleet observability across deployments | API beta; UI development-only | `GET /api/v1/observability/dashboard/fleet`, `GET /api/v1/observability/dashboard/ui` |
 | Session lifecycle management | Shipped | `POST /api/v1/observability/sessions`, `PATCH /api/v1/observability/sessions/{session_id}`, `GET /api/v1/observability/sessions/active` |
 | Anomaly detection and triage | Shipped | `POST /api/v1/observability/detectors/run`, `GET /api/v1/observability/anomalies`, `GET /api/v1/observability/anomalies/groups` |
-| Budget controls and actioning | Shipped | `POST /api/v1/observability/budget-policies`, `POST /api/v1/observability/policies/evaluate`, `GET /api/v1/observability/budget-policies/events` |
-| Approval-gated shutdown safety | Shipped | `POST /api/v1/observability/policy-approvals`, `POST /api/v1/observability/policy-approvals/{approval_id}/decision` |
+| Budget policy evaluation and control requests | Backend beta; no runtime delivery | `POST /api/v1/observability/budget-policies`, `POST /api/v1/observability/policies/evaluate`, `GET /api/v1/observability/budget-policies/events` |
+| Approval workflow for shutdown requests | Backend beta; no runtime acknowledgement | `POST /api/v1/observability/policy-approvals`, `POST /api/v1/observability/policy-approvals/{approval_id}/decision` |
 | Multi-agent delegation tracing | Shipped | `POST /api/v1/observability/delegations`, `GET /api/v1/observability/chains/{trace_id}` |
 | Memory consistency monitoring | Shipped | `POST /api/v1/observability/memory/snapshots/batch`, `GET /api/v1/observability/memory/consistency` |
 | Cost analytics and risk insights | Shipped | `GET /api/v1/observability/costs/summary`, `GET /api/v1/observability/insights/risk` |
-| Runtime operations and scheduler visibility | Shipped | `POST /api/v1/observability/operations/run`, `GET /api/v1/observability/operations/status`, `GET /api/v1/observability/operations/runs` |
+| Runtime operations and scheduler visibility | Backend beta; leader-fenced | `POST /api/v1/observability/operations/run`, `GET /api/v1/observability/operations/status`, `GET /api/v1/observability/operations/runs` |
 | Governance audit and SIEM export | Shipped | `GET /api/v1/observability/audit/events`, `POST /api/v1/observability/exports/siem` |
 
 ## Architecture
@@ -97,9 +109,7 @@ pip install -e ".[dev]"
 ### 3. Start dependencies
 
 ```bash
-cd docker
-docker compose up -d db redis
-cd ..
+docker compose -f docker/docker-compose.yml up -d db redis
 ```
 
 ### 4. Configure and migrate
@@ -108,6 +118,10 @@ cd ..
 cp .env.example .env
 alembic upgrade head
 ```
+
+The example environment connects to the Compose PostgreSQL service through
+`localhost:5434`. List-valued settings accept a single value, comma-delimited values,
+or a JSON array.
 
 ### 5. Run API
 
@@ -127,6 +141,12 @@ Build image:
 ```bash
 docker build -f docker/Dockerfile .
 ```
+
+The image and security gate consume the same hash-checked runtime and build artifacts at
+`requirements/production.lock` and `requirements/build.lock`. The builder creates the
+application wheel with PEP 517 isolation disabled, so no undeclared build dependency can
+be resolved. Local editable development installation remains `pip install -e ".[dev]"`;
+it does not modify either Docker lock.
 
 Container startup guard rails:
 
@@ -189,6 +209,9 @@ Container startup guard rails:
 - `GET /api/v1/observability/dashboard/ui`
 
 Anomaly endpoints support optional `deployment_id` filtering for targeted triage.
+The built-in dashboard is development-only and deliberately returns 503 when
+header-based production authentication is enabled; use authenticated API clients
+until browser session authentication is configured.
 
 ### Platform Ops APIs
 
@@ -197,6 +220,10 @@ Anomaly endpoints support optional `deployment_id` filtering for targeted triage
 - `GET /health/ready`
 - `GET /metrics`
 - `GET /docs`
+
+`/metrics` and `/api/v1/observability/operations/status` require a global
+administrator credential when API authentication is enabled and expose only
+aggregate, tenant-free scheduler state.
 
 ## Notification Routing
 
@@ -266,7 +293,7 @@ Configure with `.env` (see `.env.example`).
 2. Use managed Postgres/Redis with backups, restore drills, and secret rotation.
 3. Run migrations as part of deployment rollout.
 4. Scope scheduler orgs explicitly and configure notification channels.
-5. Require approval for shutdown policy actions.
+5. Require approval for shutdown control requests.
 6. Wire `/health/live`, `/health/ready`, and `/metrics` into orchestration and alerting.
 7. Export SIEM bundles into security analytics workflows.
 8. Run deployment preflight checks (`ai-trace-preflight`) before release.
@@ -290,7 +317,7 @@ docker build -f docker/Dockerfile .
 ## Security and Governance Notes
 
 - API auth + RBAC + tenant scope enforcement are available and should be enabled in production.
-- Shutdown actions can be approval-gated and audited through policy-approval APIs.
+- Shutdown control requests can be approval-gated and audited through policy-approval APIs.
 - System-level audit events are persisted and queryable for governance and incident review.
 - SIEM export supports anomaly, policy, operations, and audit bundles for external retention.
 
@@ -298,10 +325,12 @@ docker build -f docker/Dockerfile .
 
 Near-term focus areas:
 
+- Browser-session authentication and a production product frontend
+- Acknowledged runtime adapters for throttle and shutdown delivery
+- Session heartbeat/staleness reconciliation and reliable active-fleet state
+- Trace exploration and drill-down workflows in the operator experience
 - Longer-horizon anomaly baselines and seasonality-aware detection
 - Adaptive suppression controls (beyond static dedupe windows)
-- Broader enterprise sink integrations and standards-aligned telemetry export
-- Feedback loops from operator triage outcomes into detector tuning
 
 ## License
 

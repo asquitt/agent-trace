@@ -5,7 +5,7 @@ from .observability_runtime import (
     evaluate_budget_policies,
     run_anomaly_detectors,
 )
-from .operations_scheduler import ObservabilityOperationsScheduler
+from .operations_scheduler import ObservabilityOperationsScheduler, public_scheduler_status
 from .ranking import RankingService
 
 __all__ = [
@@ -14,4 +14,5 @@ __all__ = [
     "evaluate_budget_policies",
     "run_anomaly_detectors",
     "ObservabilityOperationsScheduler",
+    "public_scheduler_status",
 ]

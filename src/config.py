@@ -1,11 +1,77 @@
 """Application configuration using pydantic-settings."""
 
+import json
 from functools import lru_cache
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
-from pydantic import Field, SecretStr
-from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, SecretStr, field_validator
+from pydantic.fields import FieldInfo
+from pydantic_settings import (
+    BaseSettings,
+    DotEnvSettingsSource,
+    EnvSettingsSource,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
+
+_DELIMITED_LIST_FIELDS = (
+    "api_keys",
+    "cors_origins",
+    "observability_scheduler_org_ids",
+    "observability_notification_webhooks",
+    "observability_notification_slack_webhooks",
+    "observability_notification_pagerduty_routing_keys",
+)
+
+
+def _parse_list_setting(value: Any) -> Any:
+    """Accept JSON arrays, comma-delimited values, scalars, and empty strings."""
+    if not isinstance(value, str):
+        return value
+
+    normalized = value.strip()
+    if not normalized:
+        return []
+
+    if normalized.startswith("["):
+        parsed = json.loads(normalized)
+        if not isinstance(parsed, list):
+            raise ValueError("list settings encoded as JSON must use an array")
+        return [
+            item.strip() if isinstance(item, str) else item
+            for item in parsed
+            if not isinstance(item, str) or item.strip()
+        ]
+
+    return [item.strip() for item in normalized.split(",") if item.strip()]
+
+
+class _DelimitedListEnvSettingsSource(EnvSettingsSource):
+    """Environment source that decodes the application's flexible list syntax."""
+
+    def decode_complex_value(
+        self,
+        field_name: str,
+        field: FieldInfo,
+        value: Any,
+    ) -> Any:
+        if field_name in _DELIMITED_LIST_FIELDS:
+            return _parse_list_setting(value)
+        return super().decode_complex_value(field_name, field, value)
+
+
+class _DelimitedListDotEnvSettingsSource(DotEnvSettingsSource):
+    """Dotenv source that decodes the application's flexible list syntax."""
+
+    def decode_complex_value(
+        self,
+        field_name: str,
+        field: FieldInfo,
+        value: Any,
+    ) -> Any:
+        if field_name in _DELIMITED_LIST_FIELDS:
+            return _parse_list_setting(value)
+        return super().decode_complex_value(field_name, field, value)
 
 
 class Settings(BaseSettings):
@@ -17,6 +83,37 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Use flexible list decoding before pydantic-settings attempts JSON parsing."""
+        environment = cast(EnvSettingsSource, env_settings)
+        dotenv = cast(DotEnvSettingsSource, dotenv_settings)
+        return (
+            init_settings,
+            _DelimitedListEnvSettingsSource(
+                settings_cls,
+                case_sensitive=environment.case_sensitive,
+                env_prefix=environment.env_prefix,
+                env_nested_delimiter=environment.env_nested_delimiter,
+            ),
+            _DelimitedListDotEnvSettingsSource(
+                settings_cls,
+                env_file=dotenv.env_file,
+                env_file_encoding=dotenv.env_file_encoding,
+                case_sensitive=dotenv.case_sensitive,
+                env_prefix=dotenv.env_prefix,
+                env_nested_delimiter=dotenv.env_nested_delimiter,
+            ),
+            file_secret_settings,
+        )
 
     # Database
     database_url: str = Field(
@@ -134,6 +231,14 @@ class Settings(BaseSettings):
     observability_scheduler_run_policies: bool = Field(default=True)
     observability_scheduler_execute_policy_actions: bool = Field(default=True)
     observability_scheduler_enable_notifications: bool = Field(default=True)
+    observability_active_session_inactivity_minutes: int = Field(
+        default=30,
+        ge=1,
+        le=10080,
+        description=(
+            "Maximum age of coalesced session last_activity_at/started_at for active projections"
+        ),
+    )
 
     # Detector tuning defaults
     observability_detector_current_window_minutes: int = Field(default=15, ge=1, le=180)
@@ -164,40 +269,10 @@ class Settings(BaseSettings):
     )
     observability_shutdown_approval_max_age_minutes: int = Field(default=60, ge=1, le=10080)
 
-    @field_validator("observability_scheduler_org_ids", mode="before")
+    @field_validator(*_DELIMITED_LIST_FIELDS, mode="before")
     @classmethod
-    def _parse_org_ids(cls, value: Any) -> Any:
-        if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
-        return value
-
-    @field_validator("observability_notification_webhooks", mode="before")
-    @classmethod
-    def _parse_webhooks(cls, value: Any) -> Any:
-        if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
-        return value
-
-    @field_validator("observability_notification_slack_webhooks", mode="before")
-    @classmethod
-    def _parse_slack_webhooks(cls, value: Any) -> Any:
-        if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
-        return value
-
-    @field_validator("observability_notification_pagerduty_routing_keys", mode="before")
-    @classmethod
-    def _parse_pagerduty_routing_keys(cls, value: Any) -> Any:
-        if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
-        return value
-
-    @field_validator("api_keys", mode="before")
-    @classmethod
-    def _parse_api_keys(cls, value: Any) -> Any:
-        if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
-        return value
+    def _parse_list_settings(cls, value: Any) -> Any:
+        return _parse_list_setting(value)
 
 
 @lru_cache

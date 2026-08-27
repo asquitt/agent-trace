@@ -9,7 +9,12 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 from src.config import Settings
-from src.security import authenticate_request, require_org_access, require_roles
+from src.security import (
+    authenticate_request,
+    require_global_admin,
+    require_org_access,
+    require_roles,
+)
 
 
 def _make_request(headers: Mapping[str, str] | None = None) -> Request:
@@ -66,3 +71,29 @@ def test_require_roles_and_org_access_enforced() -> None:
     with pytest.raises(HTTPException) as org_exc:
         require_org_access(auth, "contoso")
     assert org_exc.value.status_code == 403
+
+
+def test_global_admin_requires_admin_role_and_global_scope() -> None:
+    settings = Settings(
+        api_auth_enabled=True,
+        api_keys=[
+            "global:root:admin:*",
+            "tenant-admin:owner:admin:acme",
+            "global-viewer:reader:viewer:*",
+        ],
+    )
+
+    global_admin = authenticate_request(
+        _make_request({"X-API-Key": "global", "X-Org-Id": "acme"}),
+        settings,
+    )
+    require_global_admin(global_admin)
+
+    for token in ("tenant-admin", "global-viewer"):
+        auth = authenticate_request(
+            _make_request({"X-API-Key": token, "X-Org-Id": "acme"}),
+            settings,
+        )
+        with pytest.raises(HTTPException) as exc:
+            require_global_admin(auth)
+        assert exc.value.status_code == 403

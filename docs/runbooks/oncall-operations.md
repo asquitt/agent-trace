@@ -1,6 +1,6 @@
 # On-Call Operations Runbook
 
-Last updated: February 14, 2026
+Last updated: August 27, 2026
 
 ## On-Call Rotation
 
@@ -25,7 +25,11 @@ Last updated: February 14, 2026
 
 - `curl -sS http://<api-host>/health/live`
 - `curl -sS http://<api-host>/health/ready`
-- `curl -sS http://<api-host>/metrics`
+- `curl -sS -H "X-API-Key: ${METRICS_API_KEY}" -H "X-Org-Id: platform-monitoring" http://<api-host>/metrics`
+
+`/metrics` and `/api/v1/observability/operations/status` are global operational
+surfaces. In authenticated environments they require a separately rotated `admin:*`
+monitoring credential; never place that value in a command transcript or repository.
 
 ## Escalation
 
