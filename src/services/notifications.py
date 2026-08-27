@@ -21,6 +21,7 @@ from pydantic import SecretStr
 
 logger = structlog.get_logger(__name__)
 PAGERDUTY_EVENTS_V2_URL = "https://events.pagerduty.com/v2/enqueue"
+NOTIFICATION_FINALIZATION_MARGIN_SECONDS = 5.0
 _SEVERITY_RANK = {
     "info": 1,
     "warning": 2,
@@ -107,6 +108,17 @@ class ResolvedNotificationTarget:
 
 class NotificationDNSUnavailableError(OSError):
     """Raised when a target cannot be resolved before any request is attempted."""
+
+
+def notification_claim_window_is_safe(
+    *,
+    claim_seconds: float,
+    attempt_timeout_seconds: float,
+) -> bool:
+    """Require a total-attempt deadline plus time to persist its final outcome."""
+    return claim_seconds >= (
+        attempt_timeout_seconds + NOTIFICATION_FINALIZATION_MARGIN_SECONDS
+    )
 
 
 def notification_secret_values(values: Sequence[str | SecretStr]) -> list[str]:
@@ -596,22 +608,31 @@ async def _post_json_with_retry(
 ) -> tuple[bool, str | None]:
     attempt_limit = max(max_attempts, 1)
     for attempt in range(1, attempt_limit + 1):
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
         try:
-            resolved = await resolve_notification_public_target(target)
-        except NotificationDNSUnavailableError:
+            async with asyncio.timeout(timeout_seconds):
+                resolved = await resolve_notification_public_target(target)
+        except (NotificationDNSUnavailableError, TimeoutError):
             if attempt < attempt_limit:
                 await asyncio.sleep(retry_backoff_seconds * attempt)
                 continue
             return False, "dns_unavailable"
         except ValueError:
             return False, "target_policy_rejected"
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            if attempt < attempt_limit:
+                await asyncio.sleep(retry_backoff_seconds * attempt)
+                continue
+            return False, "dns_unavailable"
         try:
-            response = await post_json_to_resolved_target(
-                resolved=resolved,
-                body=body,
-                headers=headers,
-                timeout_seconds=timeout_seconds,
-            )
+            async with asyncio.timeout(remaining):
+                response = await post_json_to_resolved_target(
+                    resolved=resolved,
+                    body=body,
+                    headers=headers,
+                    timeout_seconds=remaining,
+                )
             if 200 <= response.status_code < 300:
                 return True, None
             if idempotency_supported and attempt < attempt_limit:

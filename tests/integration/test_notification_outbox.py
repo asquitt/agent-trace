@@ -191,6 +191,20 @@ async def test_outbox_enqueue_and_claim_are_atomic_and_secret_free() -> None:
 
 
 @pytest.mark.asyncio
+async def test_enabled_outbox_rejects_claim_without_finalization_margin() -> None:
+    engine, factory = _database()
+    settings = _settings("https://hooks.example.com/receiver", idempotent=True)
+    settings.observability_scheduler_enable_notifications = True
+    settings.observability_notification_timeout_seconds = 9.9
+    settings.observability_notification_claim_seconds = 10
+    try:
+        with pytest.raises(ValueError, match="total attempt deadline"):
+            NotificationOutboxService(factory, settings)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_idempotent_acceptance_updates_only_delivery_truth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -586,6 +600,56 @@ async def test_dns_outage_is_retryable_before_non_idempotent_send(
             delivery = await session.get(NotificationDelivery, claim.delivery_id)
         assert delivery is not None
         assert delivery.status == "retry_scheduled"
+        assert delivery.last_error_code == "dns_unavailable"
+    finally:
+        await _cleanup(factory, org_id)
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_total_attempt_deadline_bounds_dns_before_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, factory = _database()
+    org_id = f"outbox-dns-deadline-{uuid4()}"
+    target = "https://hooks.example.com/non-idempotent"
+    settings = _settings(target, idempotent=False)
+    settings.observability_notification_timeout_seconds = 0.1
+    service = NotificationOutboxService(factory, settings)
+    run = await _seed_run(factory, org_id=org_id)
+    posts = 0
+    try:
+        await _enqueue(service, factory, run, nested_secret="never-persist")
+        claim = (await service.claim_ready(org_id=org_id, limit=1, worker_id="worker"))[0]
+
+        async def resolve(_claim: Any) -> str:
+            return target
+
+        async def slow_dns(_target: str) -> ResolvedNotificationTarget:
+            await asyncio.sleep(0.2)
+            return _resolved(target)
+
+        async def post(**_kwargs: Any) -> httpx.Response:
+            nonlocal posts
+            posts += 1
+            return httpx.Response(202)
+
+        service._resolve_target = resolve  # type: ignore[method-assign]  # noqa: SLF001
+        monkeypatch.setattr(
+            notification_outbox_service,
+            "resolve_notification_public_target",
+            slow_dns,
+        )
+        monkeypatch.setattr(notification_outbox_service, "post_json_to_resolved_target", post)
+
+        assert (
+            await service._deliver_one(claim, worker_id="worker")  # noqa: SLF001
+            == "retry_scheduled"
+        )
+        assert posts == 0
+        async with factory() as session:
+            delivery = await session.get(NotificationDelivery, claim.delivery_id)
+        assert delivery is not None
         assert delivery.last_error_code == "dns_unavailable"
     finally:
         await _cleanup(factory, org_id)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 from collections import Counter
@@ -31,6 +32,7 @@ from .notifications import (
     _pagerduty_payload_with_dedup,
     _slack_payload,
     classify_notification_targets,
+    notification_claim_window_is_safe,
     notification_secret_values,
     notification_target_fingerprint,
     post_json_to_resolved_target,
@@ -143,11 +145,15 @@ class NotificationOutboxService:
                 raise ValueError(
                     "scheduled notifications require a 32-byte fingerprint key"
                 )
-            if settings.observability_notification_claim_seconds <= (
-                settings.observability_notification_timeout_seconds
+            if not notification_claim_window_is_safe(
+                claim_seconds=settings.observability_notification_claim_seconds,
+                attempt_timeout_seconds=(
+                    settings.observability_notification_timeout_seconds
+                ),
             ):
                 raise ValueError(
-                    "notification claim window must exceed the request timeout"
+                    "notification claim window must include the total attempt "
+                    "deadline and finalization margin"
                 )
 
     async def _target_candidates(
@@ -601,6 +607,27 @@ class NotificationOutboxService:
             return NotificationDeliveryStatus.DEAD_LETTER.value
         return NotificationDeliveryStatus.UNCERTAIN.value
 
+    async def _finalize_pre_request_failure(
+        self,
+        claim: ClaimedNotification,
+        *,
+        worker_id: str,
+        error_code: str,
+    ) -> str:
+        status = (
+            NotificationDeliveryStatus.RETRY_SCHEDULED.value
+            if claim.attempt_number < claim.max_attempts
+            else NotificationDeliveryStatus.DEAD_LETTER.value
+        )
+        await self._finalize(
+            claim,
+            worker_id=worker_id,
+            status=status,
+            outcome=error_code,
+            error_code=error_code,
+        )
+        return status
+
     async def _finalize(
         self,
         claim: ClaimedNotification,
@@ -743,8 +770,17 @@ class NotificationOutboxService:
         *,
         worker_id: str,
     ) -> str:
+        timeout_seconds = self._settings.observability_notification_timeout_seconds
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
         try:
-            target = await self._resolve_target(claim)
+            async with asyncio.timeout(timeout_seconds):
+                target = await self._resolve_target(claim)
+        except TimeoutError:
+            return await self._finalize_pre_request_failure(
+                claim,
+                worker_id=worker_id,
+                error_code="target_resolution_timeout",
+            )
         except ValueError:
             await self._finalize(
                 claim,
@@ -779,22 +815,22 @@ class NotificationOutboxService:
         elif claim.idempotency_supported:
             headers["Idempotency-Key"] = claim.idempotency_key
 
-        try:
-            resolved = await resolve_notification_public_target(post_target)
-        except NotificationDNSUnavailableError:
-            status = (
-                NotificationDeliveryStatus.RETRY_SCHEDULED.value
-                if claim.attempt_number < claim.max_attempts
-                else NotificationDeliveryStatus.DEAD_LETTER.value
-            )
-            await self._finalize(
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            return await self._finalize_pre_request_failure(
                 claim,
                 worker_id=worker_id,
-                status=status,
-                outcome="dns_unavailable",
+                error_code="target_resolution_timeout",
+            )
+        try:
+            async with asyncio.timeout(remaining):
+                resolved = await resolve_notification_public_target(post_target)
+        except (NotificationDNSUnavailableError, TimeoutError):
+            return await self._finalize_pre_request_failure(
+                claim,
+                worker_id=worker_id,
                 error_code="dns_unavailable",
             )
-            return status
         except ValueError:
             await self._finalize(
                 claim,
@@ -805,13 +841,21 @@ class NotificationOutboxService:
             )
             return NotificationDeliveryStatus.BLOCKED.value
 
-        try:
-            response = await post_json_to_resolved_target(
-                resolved=resolved,
-                body=body,
-                headers=headers,
-                timeout_seconds=self._settings.observability_notification_timeout_seconds,
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            return await self._finalize_pre_request_failure(
+                claim,
+                worker_id=worker_id,
+                error_code="dns_unavailable",
             )
+        try:
+            async with asyncio.timeout(remaining):
+                response = await post_json_to_resolved_target(
+                    resolved=resolved,
+                    body=body,
+                    headers=headers,
+                    timeout_seconds=remaining,
+                )
         except Exception as exc:  # network outcome is ambiguous
             status = self._retry_status(claim)
             error_code = f"transport_{type(exc).__name__}"

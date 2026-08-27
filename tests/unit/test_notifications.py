@@ -15,6 +15,7 @@ from src.services.notifications import (
     collect_policy_notification_targets,
     merge_runtime_notification_targets,
     normalize_webhook_targets,
+    notification_claim_window_is_safe,
     notification_target_fingerprint,
     runtime_event_severity,
     runtime_notification_gate_result,
@@ -186,6 +187,17 @@ def test_target_fingerprint_is_keyed_and_target_free() -> None:
     assert first != second
     assert target not in first
     assert len(first) == 64
+
+
+def test_notification_claim_window_includes_finalization_margin() -> None:
+    assert notification_claim_window_is_safe(
+        claim_seconds=10,
+        attempt_timeout_seconds=5,
+    )
+    assert not notification_claim_window_is_safe(
+        claim_seconds=10,
+        attempt_timeout_seconds=9.9,
+    )
 
 
 @pytest.mark.parametrize(

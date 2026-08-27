@@ -103,6 +103,27 @@ def test_preflight_accepts_safe_scheduler_notification_contract(tmp_path: Path) 
     assert not any(result.status == "fail" for result in run_preflight(settings))
 
 
+def test_preflight_rejects_claim_without_finalization_margin(tmp_path: Path) -> None:
+    console_dist = tmp_path / "console"
+    console_dist.mkdir()
+    (console_dist / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    settings = Settings(
+        operator_console_dist_dir=str(console_dist),
+        observability_scheduler_enabled=True,
+        observability_scheduler_org_ids=["acme"],
+        observability_scheduler_enable_notifications=True,
+        observability_notification_webhooks=["https://hooks.example.com/runtime"],
+        observability_notification_allowed_hosts=["hooks.example.com"],
+        observability_notification_fingerprint_key="x" * 32,
+        observability_notification_timeout_seconds=9.9,
+        observability_notification_claim_seconds=10,
+    )
+
+    failures = [result.message for result in run_preflight(settings) if result.status == "fail"]
+
+    assert any("total attempt deadline plus finalization margin" in message for message in failures)
+
+
 def test_preflight_rejects_missing_operator_console(tmp_path: Path) -> None:
     settings = Settings(operator_console_dist_dir=str(tmp_path / "missing"))
 

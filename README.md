@@ -29,7 +29,7 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime-governance
 - Current validation snapshot:
   - `ruff check --select F src tests` passed
   - `pyright` passed (`0 errors`)
-  - `pytest -q` passed (`173 passed`) against PostgreSQL, including browser-session
+  - `pytest -q` passed (`177 passed`) against PostgreSQL, including browser-session
     persistence, tenant-scoped operator APIs, durable scheduler fencing, runtime controls,
     and transactional notification-outbox delivery
   - operator console `npm test`, TypeScript validation, production build, and npm audit
@@ -385,7 +385,8 @@ evidence for that profile, not a universal production sizing rule.
 3. Run migrations as part of deployment rollout.
 4. Scope scheduler orgs explicitly. Before enabling scheduled notifications, configure
    a 32-byte-or-longer fingerprint key, exact HTTPS host allowlist, at least one channel,
-   and a claim window longer than the outbound timeout. Treat `accepted` as receiver
+   and a claim window at least five seconds longer than the total outbound-attempt
+   timeout. Treat `accepted` as receiver
    endpoint acceptance, not human delivery.
 5. Require approval for shutdown control requests.
 6. Wire `/health/live`, `/health/ready`, and `/metrics` into orchestration and alerting.

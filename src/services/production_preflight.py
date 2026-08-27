@@ -8,6 +8,7 @@ from typing import Callable
 
 from ..config import Settings
 from .notifications import (
+    notification_claim_window_is_safe,
     notification_secret_values,
     validate_notification_https_target,
 )
@@ -43,8 +44,9 @@ def _scheduler_notification_configuration_valid(settings: Settings) -> bool:
     )
     if not targets and not slack_targets and not pagerduty_keys:
         return False
-    if settings.observability_notification_claim_seconds <= (
-        settings.observability_notification_timeout_seconds
+    if not notification_claim_window_is_safe(
+        claim_seconds=settings.observability_notification_claim_seconds,
+        attempt_timeout_seconds=settings.observability_notification_timeout_seconds,
     ):
         return False
     try:
@@ -121,7 +123,7 @@ def run_preflight(settings: Settings) -> list[CheckResult]:
             (
                 "Scheduler notifications require the durable outbox, an enabled scheduler, "
                 "a 32-byte fingerprint key, safe channels, exact HTTPS host allowlisting, "
-                "and a claim window longer than the request timeout."
+                "and a claim window covering the total attempt deadline plus finalization margin."
             ),
         ),
         _bool_check(
