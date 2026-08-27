@@ -60,6 +60,10 @@ from ...utils.time import to_naive_utc, utc_now_iso, utc_now_naive
 
 router = APIRouter(prefix="/api/v1/observability", tags=["observability"])
 
+# Telemetry timestamps may lead server receipt time slightly for normal clock
+# skew, but never far enough to keep an ACTIVE projection fresh indefinitely.
+_MAX_ACTIVITY_FUTURE_SKEW = timedelta(minutes=5)
+
 
 def _to_iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat() if dt else None
@@ -212,6 +216,26 @@ def _active_session_cutoff(now: datetime, inactivity_minutes: int) -> datetime:
     return now - timedelta(minutes=inactivity_minutes)
 
 
+def _activity_future_cutoff(now: datetime) -> datetime:
+    """Return the maximum trusted liveness timestamp for the current request."""
+    return now + _MAX_ACTIVITY_FUTURE_SKEW
+
+
+def _validate_activity_timestamp(
+    candidate: datetime,
+    *,
+    received_at: datetime,
+    field_name: str,
+) -> datetime:
+    """Reject caller timestamps outside the documented future-skew allowance."""
+    if candidate > _activity_future_cutoff(received_at):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} cannot be more than 5 minutes in the future",
+        )
+    return candidate
+
+
 def _monotonic_activity_watermark(
     *,
     started_at: datetime,
@@ -222,19 +246,28 @@ def _monotonic_activity_watermark(
     return max(started_at, current or started_at, candidate)
 
 
-def _recent_active_session_filters(cutoff: datetime) -> list[Any]:
+def _recent_active_session_filters(
+    cutoff: datetime,
+    future_cutoff: datetime,
+) -> list[Any]:
     """Return SQL predicates for ACTIVE sessions with a recent heartbeat or start."""
+    activity = func.coalesce(AgentSession.last_activity_at, AgentSession.started_at)
     return [
         AgentSession.status == SessionStatus.ACTIVE.value,
-        func.coalesce(AgentSession.last_activity_at, AgentSession.started_at) >= cutoff,
+        activity >= cutoff,
+        activity <= future_cutoff,
     ]
 
 
-def _stale_active_session_filters(cutoff: datetime) -> list[Any]:
-    """Return SQL predicates for ACTIVE rows excluded by the inactivity contract."""
+def _stale_active_session_filters(
+    cutoff: datetime,
+    future_cutoff: datetime,
+) -> list[Any]:
+    """Return ACTIVE rows excluded for stale or invalid-future activity."""
+    activity = func.coalesce(AgentSession.last_activity_at, AgentSession.started_at)
     return [
         AgentSession.status == SessionStatus.ACTIVE.value,
-        func.coalesce(AgentSession.last_activity_at, AgentSession.started_at) < cutoff,
+        or_(activity < cutoff, activity > future_cutoff),
     ]
 
 
@@ -1446,7 +1479,12 @@ async def create_session(
     auth: AuthDep,
 ) -> SessionResponse:
     _require_operator(auth)
-    started_at = _to_db_datetime(payload.started_at)
+    received_at = utc_now_naive()
+    started_at = _validate_activity_timestamp(
+        _to_db_datetime(payload.started_at),
+        received_at=received_at,
+        field_name="started_at",
+    )
 
     async with storage.session_factory() as session:
         deployment = await session.get(AgentDeployment, payload.deployment_id)
@@ -1517,7 +1555,11 @@ async def update_session(
         if payload.error_message is not None:
             session_row.error_message = payload.error_message
         if payload.last_activity_at is not None:
-            activity_candidate = _to_db_datetime(payload.last_activity_at)
+            activity_candidate = _validate_activity_timestamp(
+                _to_db_datetime(payload.last_activity_at),
+                received_at=utc_now_naive(),
+                field_name="last_activity_at",
+            )
             session_row.last_activity_at = _monotonic_activity_watermark(
                 started_at=session_row.started_at,
                 current=session_row.last_activity_at,
@@ -1551,8 +1593,9 @@ async def list_active_sessions(
     now = utc_now_naive()
     inactivity_minutes = settings.observability_active_session_inactivity_minutes
     activity_cutoff = _active_session_cutoff(now, inactivity_minutes)
-    recent_filters = _recent_active_session_filters(activity_cutoff)
-    stale_filters = _stale_active_session_filters(activity_cutoff)
+    future_cutoff = _activity_future_cutoff(now)
+    recent_filters = _recent_active_session_filters(activity_cutoff, future_cutoff)
+    stale_filters = _stale_active_session_filters(activity_cutoff, future_cutoff)
 
     async with storage.session_factory() as session:
         base = (
@@ -1675,6 +1718,14 @@ async def ingest_action_batch(
             raise HTTPException(status_code=404, detail="Deployment not found")
         _enforce_org_scope(auth, deployment.org_id)
 
+        received_at = utc_now_naive()
+        for event in payload.events:
+            _validate_activity_timestamp(
+                _to_db_datetime(event.occurred_at),
+                received_at=received_at,
+                field_name="occurred_at",
+            )
+
         for trace_id in {event.trace_id for event in payload.events if event.trace_id is not None}:
             await _require_trace_org(
                 session,
@@ -1775,7 +1826,7 @@ async def ingest_action_batch(
                 policy_evaluation = await evaluate_budget_policies(
                     session,
                     deployment.org_id,
-                    as_of=latest_event or utc_now_naive(),
+                    as_of=latest_event or received_at,
                     execute_actions=True,
                     require_shutdown_approval=settings.observability_shutdown_requires_approval,
                     approval_max_age_minutes=settings.observability_shutdown_approval_max_age_minutes,
@@ -3424,9 +3475,11 @@ async def get_fleet_dashboard(
     from_time = _to_db_datetime(from_time)
     to_time = _to_db_datetime(to_time)
     inactivity_minutes = settings.observability_active_session_inactivity_minutes
-    activity_cutoff = _active_session_cutoff(utc_now_naive(), inactivity_minutes)
-    recent_active_filters = _recent_active_session_filters(activity_cutoff)
-    stale_active_filters = _stale_active_session_filters(activity_cutoff)
+    projection_now = utc_now_naive()
+    activity_cutoff = _active_session_cutoff(projection_now, inactivity_minutes)
+    future_cutoff = _activity_future_cutoff(projection_now)
+    recent_active_filters = _recent_active_session_filters(activity_cutoff, future_cutoff)
+    stale_active_filters = _stale_active_session_filters(activity_cutoff, future_cutoff)
 
     async with storage.session_factory() as session:
         action_filters = [

@@ -613,6 +613,18 @@ def test_stale_active_sessions_are_excluded_from_product_projections(
         stale_activity_id = create_session("stale-explicit-activity", stale_started_at)
         stale_started_fallback_id = create_session("stale-start-fallback", stale_started_at)
 
+        far_future = now + timedelta(days=365)
+        future_create_resp = client.post(
+            "/api/v1/observability/sessions",
+            json={
+                "deployment_id": deployment_id,
+                "agent_id": "future-session",
+                "started_at": far_future.isoformat(),
+            },
+        )
+        assert future_create_resp.status_code == 422
+        assert "5 minutes in the future" in future_create_resp.json()["detail"]
+
         # Exercise COALESCE(last_activity_at, started_at) on both sides of the cutoff.
         client.portal.call(_clear_activity, fresh_started_fallback_id)
         client.portal.call(_clear_activity, stale_started_fallback_id)
@@ -630,6 +642,11 @@ def test_stale_active_sessions_are_excluded_from_product_projections(
             json={"last_activity_at": stale_started_at.isoformat()},
         )
         assert delayed_heartbeat_resp.status_code == 200
+        future_heartbeat_resp = client.patch(
+            f"/api/v1/observability/sessions/{fresh_activity_id}",
+            json={"last_activity_at": far_future.isoformat()},
+        )
+        assert future_heartbeat_resp.status_code == 422
         delayed_batch_resp = client.post(
             "/api/v1/observability/actions/batch",
             params={"evaluate_policies": "false"},
@@ -647,6 +664,22 @@ def test_stale_active_sessions_are_excluded_from_product_projections(
             },
         )
         assert delayed_batch_resp.status_code == 202
+        future_batch_resp = client.post(
+            "/api/v1/observability/actions/batch",
+            params={"evaluate_policies": "false"},
+            json={
+                "session_id": fresh_activity_id,
+                "events": [
+                    {
+                        "client_event_id": str(uuid4()),
+                        "action_type": "tool_call",
+                        "action_name": "future-event",
+                        "occurred_at": far_future.isoformat(),
+                    }
+                ],
+            },
+        )
+        assert future_batch_resp.status_code == 422
 
         active_resp = client.get(
             "/api/v1/observability/sessions/active",

@@ -33,6 +33,11 @@ logger = structlog.get_logger(__name__)
 # Keeping the lock global to this database guarantees one scheduler leader across
 # every API replica without requiring a coordination table or schema migration.
 _SCHEDULER_ADVISORY_LOCK_ID = 0x4149545241434501
+# A second session lock fences the complete detector/policy/notification window.
+# A replacement replica may acquire the coordination lock after a connection loss,
+# but it cannot become leader or start side effects until the prior execution fence
+# is released. This prevents overlapping scheduler runs during failover.
+_SCHEDULER_EXECUTION_LOCK_ID = 0x4149545241434502
 _LEADERSHIP_RETRY_SECONDS = 5.0
 
 _PUBLIC_SCHEDULER_STATUS_KEYS = (
@@ -239,15 +244,27 @@ class ObservabilityOperationsScheduler:
         settings: Settings,
         *,
         leadership_lock: SchedulerLeadershipLock | None = None,
+        execution_lock: SchedulerLeadershipLock | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
-        if leadership_lock is None:
+        if leadership_lock is not None and execution_lock is None:
+            # Explicit test coordinators may implement both roles with one
+            # idempotent lock object. Production always receives two IDs.
+            execution_lock = leadership_lock
+        elif leadership_lock is None or execution_lock is None:
             bind = session_factory.kw.get("bind")
             if not isinstance(bind, AsyncEngine):
                 raise TypeError("scheduler session factory must be bound to an AsyncEngine")
-            leadership_lock = PostgresAdvisoryLeadershipLock(bind)
+            if leadership_lock is None:
+                leadership_lock = PostgresAdvisoryLeadershipLock(bind)
+            if execution_lock is None:
+                execution_lock = PostgresAdvisoryLeadershipLock(
+                    bind,
+                    lock_id=_SCHEDULER_EXECUTION_LOCK_ID,
+                )
         self._leadership_lock = leadership_lock
+        self._execution_lock = execution_lock
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._state: dict[str, Any] = {
@@ -293,7 +310,7 @@ class ObservabilityOperationsScheduler:
             self._task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._task
-        await self._leadership_lock.release()
+        await self._release_coordination()
         self._task = None
         self._state["running"] = False
         self._set_leadership_state(
@@ -326,27 +343,54 @@ class ObservabilityOperationsScheduler:
         self._state["last_leadership_error"] = error
 
     async def _ensure_leadership(self) -> bool:
-        """Acquire or verify scheduler leadership, failing safely on DB errors."""
+        """Acquire or verify both coordination and execution fences."""
         try:
             if self._state["is_leader"]:
-                if await self._leadership_lock.verify():
+                leadership_valid = await self._leadership_lock.verify()
+                execution_valid = (
+                    leadership_valid
+                    if self._execution_lock is self._leadership_lock
+                    else await self._execution_lock.verify()
+                )
+                if leadership_valid and execution_valid:
                     return True
-                self._set_leadership_state("contending")
+                self._set_leadership_state("error", error="scheduler_fence_lost")
+                await self._release_coordination()
+                return False
 
-            if await self._leadership_lock.try_acquire():
-                self._set_leadership_state("leader")
-                logger.info("observability_scheduler_leadership_acquired")
-                return True
+            if not await self._leadership_lock.try_acquire():
+                self._set_leadership_state("standby")
+                return False
 
-            self._set_leadership_state("standby")
-            return False
+            if not await self._execution_lock.try_acquire():
+                # Another replica is still completing an in-flight side-effect
+                # window. Relinquish coordination so no replacement reports leader
+                # until it owns both independent fences.
+                self._set_leadership_state("standby")
+                await self._leadership_lock.release()
+                return False
+
+            self._set_leadership_state("leader")
+            logger.info("observability_scheduler_leadership_acquired")
+            return True
         except Exception as exc:  # pragma: no cover - exact driver errors vary
             self._set_leadership_state("error", error="leadership_lock_unavailable")
+            await self._release_coordination()
             logger.exception(
                 "observability_scheduler_leadership_error",
                 error=str(exc),
             )
             return False
+
+    async def _release_coordination(self) -> None:
+        """Release the execution fence before the leadership coordinator."""
+        if self._execution_lock is self._leadership_lock:
+            await self._leadership_lock.release()
+            return
+        try:
+            await self._execution_lock.release()
+        finally:
+            await self._leadership_lock.release()
 
     async def _wait(self, timeout: float) -> None:
         with suppress(TimeoutError):
@@ -577,6 +621,12 @@ class ObservabilityOperationsScheduler:
                             org_id=org_id,
                             error=error_message,
                         )
+                    # Re-verify both fences immediately after the complete database
+                    # and notification window. A replacement cannot enter while the
+                    # execution fence is held, so failover never overlaps side effects.
+                    if not await self._ensure_leadership():
+                        leadership_lost = True
+                        break
 
                 if successful_runs > 0:
                     self._state["last_success_at"] = utc_now_iso()
@@ -589,8 +639,11 @@ class ObservabilityOperationsScheduler:
                     self._state["last_error"] = None
                 self._state["last_tick_failures"] = tick_failures
 
-                await self._wait(float(self._settings.observability_scheduler_interval_seconds))
+                wait_seconds = float(self._settings.observability_scheduler_interval_seconds)
+                if leadership_lost:
+                    wait_seconds = min(wait_seconds, _LEADERSHIP_RETRY_SECONDS)
+                await self._wait(wait_seconds)
         finally:
-            await self._leadership_lock.release()
+            await self._release_coordination()
             if self._state["running"]:
                 self._set_leadership_state("stopped")

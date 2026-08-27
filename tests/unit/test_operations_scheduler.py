@@ -28,8 +28,11 @@ class FakeLeadershipLock:
         self.coordinator = coordinator or FakeLeadershipCoordinator()
         self.release_calls = 0
         self.verify_error: Exception | None = None
+        self.acquire_enabled = True
 
     async def try_acquire(self) -> bool:
+        if not self.acquire_enabled:
+            return False
         if self.coordinator.owner in (None, self):
             self.coordinator.owner = self
             return True
@@ -469,6 +472,88 @@ async def test_standby_takes_over_after_leader_releases_lock(
     assert coordinator.owner is second_lock
 
     await second.stop()
+
+
+@pytest.mark.asyncio
+async def test_execution_fence_prevents_overlap_after_leadership_connection_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leadership_coordinator = FakeLeadershipCoordinator()
+    execution_coordinator = FakeLeadershipCoordinator()
+    first_leadership = FakeLeadershipLock(leadership_coordinator)
+    second_leadership = FakeLeadershipLock(leadership_coordinator)
+    first_execution = FakeLeadershipLock(execution_coordinator)
+    second_execution = FakeLeadershipLock(execution_coordinator)
+    first_run_started = asyncio.Event()
+    allow_first_to_finish = asyncio.Event()
+    second_run_started = asyncio.Event()
+    active_runs = 0
+    max_active_runs = 0
+
+    async def fake_run_once(
+        self: ObservabilityOperationsScheduler,
+        org_id: str,
+    ) -> dict[str, Any]:
+        nonlocal active_runs, max_active_runs
+        active_runs += 1
+        max_active_runs = max(max_active_runs, active_runs)
+        try:
+            if self is first:
+                first_run_started.set()
+                await allow_first_to_finish.wait()
+            else:
+                second_run_started.set()
+            return {"org_id": org_id}
+        finally:
+            active_runs -= 1
+
+    monkeypatch.setattr(ObservabilityOperationsScheduler, "run_once", fake_run_once)
+    monkeypatch.setattr("src.services.operations_scheduler._LEADERSHIP_RETRY_SECONDS", 0.01)
+
+    settings = _settings(
+        observability_scheduler_enabled=True,
+        observability_scheduler_org_ids=["acme"],
+    )
+    first = ObservabilityOperationsScheduler(
+        _session_factory_stub(),
+        settings,
+        leadership_lock=first_leadership,
+        execution_lock=first_execution,
+    )
+    second = ObservabilityOperationsScheduler(
+        _session_factory_stub(),
+        settings,
+        leadership_lock=second_leadership,
+        execution_lock=second_execution,
+    )
+
+    await first.start()
+    await asyncio.wait_for(first_run_started.wait(), timeout=1)
+
+    # Model the dedicated leadership connection disappearing while the first
+    # replica is inside database/notification work. It cannot reacquire, while
+    # its independent execution fence remains held until the side effects end.
+    leadership_coordinator.owner = None
+    first_leadership.acquire_enabled = False
+    await second.start()
+    for _ in range(50):
+        if second.status()["leadership_state"] == "standby":
+            break
+        await asyncio.sleep(0)
+
+    assert second.status()["is_leader"] is False
+    assert execution_coordinator.owner is first_execution
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(second_run_started.wait(), timeout=0.05)
+
+    allow_first_to_finish.set()
+    await asyncio.wait_for(second_run_started.wait(), timeout=1)
+
+    assert max_active_runs == 1
+    assert second.status()["is_leader"] is True
+    assert execution_coordinator.owner is second_execution
+
+    await asyncio.gather(first.stop(), second.stop())
 
 
 @pytest.mark.asyncio

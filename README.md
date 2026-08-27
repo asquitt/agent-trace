@@ -213,6 +213,10 @@ The built-in dashboard is development-only and deliberately returns 503 when
 header-based production authentication is enabled; use authenticated API clients
 until browser session authentication is configured.
 
+ACTIVE-session projections accept at most five minutes of client clock skew. Session
+starts, heartbeats, and action events farther in the future are rejected with HTTP 422,
+and historical rows beyond that bound are excluded from active-fleet totals.
+
 ### Platform Ops APIs
 
 - `GET /health`

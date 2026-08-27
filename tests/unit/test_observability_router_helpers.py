@@ -10,11 +10,13 @@ from sqlalchemy.dialects import postgresql
 
 from src.api.routers.observability import (
     _active_session_cutoff,
+    _activity_future_cutoff,
     _default_group_update_match_statuses,
     _monotonic_activity_watermark,
     _parse_anomaly_group_fingerprint,
     _recent_active_session_filters,
     _stale_active_session_filters,
+    _validate_activity_timestamp,
 )
 from src.models.observability import AgentSession, AnomalyStatus, AnomalyType
 
@@ -82,16 +84,41 @@ def test_activity_watermark_never_moves_backward() -> None:
     ) == started_at
 
 
+def test_activity_timestamp_allows_small_skew_and_rejects_untrusted_future_time() -> None:
+    received_at = datetime(2026, 8, 27, 12, 0, 0)
+    allowed = received_at + timedelta(minutes=5)
+
+    assert _activity_future_cutoff(received_at) == allowed
+    assert (
+        _validate_activity_timestamp(
+            allowed,
+            received_at=received_at,
+            field_name="occurred_at",
+        )
+        == allowed
+    )
+    with pytest.raises(HTTPException) as exc:
+        _validate_activity_timestamp(
+            allowed + timedelta(microseconds=1),
+            received_at=received_at,
+            field_name="occurred_at",
+        )
+
+    assert exc.value.status_code == 422
+    assert "5 minutes in the future" in str(exc.value.detail)
+
+
 def test_active_session_filters_use_coalesced_activity_timestamp() -> None:
     cutoff = datetime(2026, 8, 13, 11, 30, 0)
+    future_cutoff = datetime(2026, 8, 13, 12, 5, 0)
     recent_sql = str(
         select(AgentSession.id)
-        .where(*_recent_active_session_filters(cutoff))
+        .where(*_recent_active_session_filters(cutoff, future_cutoff))
         .compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
     )
     stale_sql = str(
         select(AgentSession.id)
-        .where(*_stale_active_session_filters(cutoff))
+        .where(*_stale_active_session_filters(cutoff, future_cutoff))
         .compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
     )
 
@@ -99,4 +126,6 @@ def test_active_session_filters_use_coalesced_activity_timestamp() -> None:
     assert activity_expression in recent_sql
     assert activity_expression in stale_sql
     assert ">=" in recent_sql
+    assert "<=" in recent_sql
     assert "<" in stale_sql
+    assert ">" in stale_sql
