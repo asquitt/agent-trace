@@ -105,6 +105,15 @@ class PolicyApprovalStatus(str, Enum):
     EXPIRED = "expired"
 
 
+class RuntimeControlStatus(str, Enum):
+    """Delivery state for a runtime control request."""
+
+    PENDING = "pending"
+    LEASED = "leased"
+    APPLIED = "applied"
+    FAILED = "failed"
+
+
 class AnomalyType(str, Enum):
     """Supported anomaly classes."""
 
@@ -669,6 +678,102 @@ class PolicyActionApproval(Base):
         Index("ix_policy_action_approvals_policy_status", "policy_id", "status"),
         Index("ix_policy_action_approvals_org_status", "org_id", "status"),
         Index("ix_policy_action_approvals_expires_at", "expires_at"),
+    )
+
+
+class RuntimeControlRequest(Base):
+    """Durable, lease-based throttle or shutdown delivery request."""
+
+    __tablename__ = "runtime_control_requests"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    org_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    deployment_id: Mapped[UUID] = mapped_column(
+        ForeignKey("agent_deployments.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    session_id: Mapped[UUID] = mapped_column(
+        ForeignKey("agent_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    policy_id: Mapped[Optional[UUID]] = mapped_column(
+        ForeignKey("budget_policies.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    policy_event_id: Mapped[Optional[UUID]] = mapped_column(
+        ForeignKey("budget_policy_events.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    approval_id: Mapped[Optional[UUID]] = mapped_column(
+        ForeignKey("policy_action_approvals.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    authorization_expires_at: Mapped[Optional[datetime]] = mapped_column(index=True)
+    action_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=RuntimeControlStatus.PENDING.value,
+        index=True,
+    )
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    available_at: Mapped[datetime] = mapped_column(nullable=False, index=True)
+    lease_token_hash: Mapped[Optional[str]] = mapped_column(String(64))
+    lease_owner_subject: Mapped[Optional[str]] = mapped_column(String(255))
+    lease_runtime_instance_id: Mapped[Optional[str]] = mapped_column(String(255))
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(index=True)
+    delivery_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    acknowledgement_id: Mapped[Optional[str]] = mapped_column(String(255))
+    acknowledgement_payload_hash: Mapped[Optional[str]] = mapped_column(String(64))
+    acknowledged_at: Mapped[Optional[datetime]] = mapped_column()
+    acknowledgement_details: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    failure_reason: Mapped[Optional[str]] = mapped_column(Text)
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "action_type IN ('throttle', 'shutdown')",
+            name="ck_runtime_control_requests_action_type",
+        ),
+        sa.CheckConstraint(
+            "status IN ('pending', 'leased', 'applied', 'failed')",
+            name="ck_runtime_control_requests_status",
+        ),
+        sa.CheckConstraint(
+            "status != 'leased' OR (lease_token_hash IS NOT NULL "
+            "AND lease_owner_subject IS NOT NULL "
+            "AND lease_runtime_instance_id IS NOT NULL "
+            "AND lease_expires_at IS NOT NULL)",
+            name="ck_runtime_control_requests_lease_fields",
+        ),
+        sa.CheckConstraint(
+            "status NOT IN ('applied', 'failed') OR acknowledged_at IS NOT NULL",
+            name="ck_runtime_control_requests_terminal_time",
+        ),
+        Index(
+            "ix_runtime_control_requests_claim_scope",
+            "org_id",
+            "deployment_id",
+            "session_id",
+            "status",
+            "available_at",
+        ),
+        Index(
+            "ix_runtime_control_requests_lease_expiry",
+            "status",
+            "lease_expires_at",
+        ),
+        Index(
+            "uq_runtime_control_requests_idempotency_key",
+            "idempotency_key",
+            unique=True,
+        ),
     )
 
 

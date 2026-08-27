@@ -249,6 +249,18 @@ class Settings(BaseSettings):
     observability_scheduler_run_detectors: bool = Field(default=True)
     observability_scheduler_run_policies: bool = Field(default=True)
     observability_scheduler_execute_policy_actions: bool = Field(default=True)
+    runtime_control_lease_seconds: int = Field(
+        default=60,
+        ge=10,
+        le=300,
+        description="Runtime control delivery lease duration",
+    )
+    runtime_control_max_delivery_attempts: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description="Maximum lease attempts before a runtime control fails closed",
+    )
     observability_scheduler_enable_notifications: bool = Field(
         default=False,
         description=(

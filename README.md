@@ -29,7 +29,7 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime-governance
 - Current validation snapshot:
   - `ruff check --select F src tests` passed
   - `pyright` passed (`0 errors`)
-  - `pytest -q` passed (`136 passed`) against PostgreSQL, including browser-session
+  - `pytest -q` passed (`146 passed`) against PostgreSQL, including browser-session
     persistence, tenant-scoped operator APIs, durable scheduler fencing, and fail-closed
     notification persistence
   - operator console `npm test`, TypeScript validation, production build, and npm audit
@@ -42,8 +42,9 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime-governance
 - Release blockers:
   - the authenticated operator console is implemented and locally runtime-verified, but
     no hosted deployment or public-environment identity has been verified
-  - runtime `shutdown`/`throttle` delivery and agent acknowledgement are not implemented;
-    current controls are persisted requests and audit records only
+  - provider-neutral runtime `shutdown`/`throttle` delivery and acknowledgement are
+    implemented and locally exact-image verified, but no customer runtime integration or
+    hosted environment has been verified
   - automated scheduler outbound notifications are intentionally fail-closed until a
     durable, idempotent outbox/claim path exists; scheduled runs persist a zero-attempt
     notification summary with `skip_reason=durable_outbox_required`
@@ -67,8 +68,8 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime-governance
 | Fleet observability across deployments | API beta; authenticated operator console alpha | `GET /api/v1/observability/dashboard/fleet`, `/console/` |
 | Session lifecycle management | Shipped | `POST /api/v1/observability/sessions`, `PATCH /api/v1/observability/sessions/{session_id}`, `GET /api/v1/observability/sessions/active` |
 | Anomaly detection and triage | Shipped | `POST /api/v1/observability/detectors/run`, `GET /api/v1/observability/anomalies`, `GET /api/v1/observability/anomalies/groups` |
-| Budget policy evaluation and control requests | Backend beta; no runtime delivery | `POST /api/v1/observability/budget-policies`, `POST /api/v1/observability/policies/evaluate`, `GET /api/v1/observability/budget-policies/events` |
-| Approval workflow for shutdown requests | Backend beta; no runtime acknowledgement | `POST /api/v1/observability/policy-approvals`, `POST /api/v1/observability/policy-approvals/{approval_id}/decision` |
+| Budget policy evaluation and control requests | Backend beta; provider-neutral runtime delivery | `POST /api/v1/observability/budget-policies`, `POST /api/v1/runtime-controls/claim`, `POST /api/v1/runtime-controls/{control_id}/ack` |
+| Approval workflow for shutdown requests | Backend beta; runtime acknowledgement implemented | `POST /api/v1/observability/policy-approvals`, `POST /api/v1/observability/policy-approvals/{approval_id}/decision` |
 | Multi-agent delegation tracing | Shipped | `POST /api/v1/observability/delegations`, `GET /api/v1/observability/chains/{trace_id}` |
 | Memory consistency monitoring | Shipped | `POST /api/v1/observability/memory/snapshots/batch`, `GET /api/v1/observability/memory/consistency` |
 | Cost analytics and risk insights | Shipped | `GET /api/v1/observability/costs/summary`, `GET /api/v1/observability/insights/risk` |
@@ -85,7 +86,8 @@ src/
 │       ├── auth.py              # API-key-to-browser-session exchange
 │       ├── console.py           # Same-origin production console assets
 │       ├── traces.py            # Trace APIs
-│       └── observability.py     # Fleet/session/runtime/policy APIs
+│       ├── observability.py     # Fleet/session/runtime/policy APIs
+│       └── runtime_controls.py  # Runtime command claim/ack APIs
 ├── cli/
 │   ├── trace_viewer.py
 │   └── production_preflight.py
@@ -93,6 +95,7 @@ src/
 ├── services/
 │   ├── observability_runtime.py # Detectors + policy evaluation/actions
 │   ├── operations_scheduler.py  # Background runtime control loop
+│   ├── runtime_controls.py      # Durable runtime command delivery
 │   ├── notifications.py         # Webhook/Slack/PagerDuty dispatch
 │   └── production_preflight.py  # Deployment readiness checks
 ├── tracing/                     # Tracer/context/provider wrappers + storage
@@ -276,6 +279,23 @@ The background scheduler does not perform outbound delivery. Even when
 `OBSERVABILITY_SCHEDULER_ENABLE_NOTIFICATIONS=true`, it fails closed and records
 `durable_outbox_required`; this flag is reserved until a transactional outbox ships.
 
+## Runtime Control Delivery
+
+Policy breaches persist provider-neutral throttle and shutdown commands in the database.
+Runtimes claim and acknowledge those commands through:
+
+- `POST /api/v1/runtime-controls/claim`
+- `POST /api/v1/runtime-controls/{control_id}/ack`
+
+Delivery is at least once. A stable control ID is the runtime execution idempotency key;
+leases are bounded, raw lease tokens are never persisted, expired leases are redelivered,
+and exact terminal acknowledgements are idempotent. Shutdown is projected as executed only
+after an approved, unexpired request is claimed and the runtime acknowledges it as applied.
+
+Runtime endpoints require an org-scoped `operator` or `admin` API key and reject browser
+sessions. In this version credentials are not deployment-scoped, so operators should issue
+a dedicated org-scoped key per runtime deployment until first-class runtime principals ship.
+
 ## Configuration
 
 Configure with `.env` (see `.env.example`).
@@ -320,6 +340,8 @@ evidence for that profile, not a universal production sizing rule.
 - `OBSERVABILITY_SCHEDULER_RUN_DETECTORS`
 - `OBSERVABILITY_SCHEDULER_RUN_POLICIES`
 - `OBSERVABILITY_SCHEDULER_EXECUTE_POLICY_ACTIONS`
+- `RUNTIME_CONTROL_LEASE_SECONDS`
+- `RUNTIME_CONTROL_MAX_DELIVERY_ATTEMPTS`
 - `OBSERVABILITY_SCHEDULER_ENABLE_NOTIFICATIONS` (reserved; must remain `false`)
 - `OBSERVABILITY_DETECTOR_ANOMALY_DEDUPE_WINDOW_MINUTES`
 - `OBSERVABILITY_DETECTOR_ANOMALY_REOPEN_ACKNOWLEDGED`
@@ -384,7 +406,7 @@ docker build -f docker/Dockerfile .
 - API auth + RBAC + tenant scope enforcement are available and should be enabled in production.
 - Browser sessions store only token hashes, are tenant/role scoped at creation, require
   CSRF validation for unsafe methods, and attribute mutations to the authenticated subject.
-- Shutdown control requests can be approval-gated and audited through policy-approval APIs.
+- Shutdown delivery is approval-gated, lease-bound, runtime-acknowledged, and audited.
 - System-level audit events are persisted and queryable for governance and incident review.
 - SIEM export supports anomaly, policy, operations, and audit bundles for external retention.
 
@@ -392,7 +414,7 @@ docker build -f docker/Dockerfile .
 
 Near-term focus areas:
 
-- Acknowledged runtime adapters for throttle and shutdown delivery
+- First-class deployment-scoped runtime principals and credential lifecycle administration
 - Durable, idempotent scheduled notification delivery
 - Hosted console deployment, public identity, and customer-journey evidence
 - SSO, user provisioning, and API-key lifecycle administration

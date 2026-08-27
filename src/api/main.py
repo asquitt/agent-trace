@@ -20,7 +20,13 @@ from ..dependencies import AuthDep
 from ..rate_limit import InMemoryRateLimiter
 from ..security import require_global_admin
 from ..services import ObservabilityOperationsScheduler, public_scheduler_status
-from .routers import auth_router, console_router, observability_router, traces_router
+from .routers import (
+    auth_router,
+    console_router,
+    observability_router,
+    runtime_controls_router,
+    traces_router,
+)
 
 logger = structlog.get_logger(__name__)
 settings = get_settings()
@@ -81,6 +87,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(traces_router)
 app.include_router(observability_router)
+app.include_router(runtime_controls_router)
 app.include_router(console_router)
 
 

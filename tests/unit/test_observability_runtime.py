@@ -71,6 +71,36 @@ def test_severity_rank_orders_levels() -> None:
 
 
 @pytest.mark.asyncio
+async def test_throttle_without_rate_fails_closed_before_delivery() -> None:
+    policy = BudgetPolicy(
+        id=uuid4(),
+        org_id="acme",
+        policy_name="invalid throttle",
+        scope_type=BudgetScopeType.ORG,
+        period_type=BudgetPeriodType.DAY,
+        action_on_breach=PolicyActionType.THROTTLE,
+        status=PolicyStatus.ACTIVE,
+        notification_targets=[],
+        policy_metadata={},
+    )
+
+    result = await _apply_policy_action(
+        cast(AsyncSession, object()),
+        policy,
+        "acme",
+        datetime(2026, 8, 27),
+        [{"trigger_type": "max_actions", "observed_value": 2.0}],
+        execute_actions=True,
+        require_shutdown_approval=True,
+        approval_max_age_minutes=60,
+    )
+
+    assert result["status"] == "invalid_configuration"
+    assert result["delivery_status"] == "blocked"
+    assert result["control_request_ids"] == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("action", "expected_name"),
     [
@@ -99,6 +129,7 @@ async def test_policy_controls_are_persisted_as_unconfirmed_requests(
         scope_type=BudgetScopeType.ORG,
         period_type=BudgetPeriodType.DAY,
         action_on_breach=action,
+        throttle_rate=10 if action == PolicyActionType.THROTTLE else None,
         status=PolicyStatus.ACTIVE,
         notification_targets=[],
         policy_metadata={},
@@ -116,9 +147,19 @@ async def test_policy_controls_are_persisted_as_unconfirmed_requests(
     class FakeDb:
         def __init__(self) -> None:
             self.added: list[Any] = []
+            self.control_request_id = uuid4()
 
         def add(self, row: Any) -> None:
             self.added.append(row)
+
+        async def execute(self, _statement: Any) -> Any:
+            control_request_id = self.control_request_id
+
+            class Result:
+                def one(self) -> Any:
+                    return control_request_id, "pending"
+
+            return Result()
 
     fake_db = FakeDb()
     monkeypatch.setattr(
@@ -140,14 +181,16 @@ async def test_policy_controls_are_persisted_as_unconfirmed_requests(
 
     assert result["status"] == "requested"
     assert result["execution_confirmed"] is False
-    assert result["delivery_status"] == "pending_runtime_adapter"
+    assert result["delivery_status"] == "pending"
+    assert result["control_request_ids"] == [str(fake_db.control_request_id)]
     assert session.status == SessionStatus.ACTIVE
     assert session.ended_at is None
     assert session.session_metadata is not None
     control = session.session_metadata["control"]
-    assert control["state"] == "requested"
+    assert control["state"] == "pending"
     assert control["requested_action"] == action.value
     assert control["execution_confirmed"] is False
+    assert control["request_id"] == str(fake_db.control_request_id)
 
     assert len(fake_db.added) == 1
     request_event = fake_db.added[0]
@@ -155,4 +198,7 @@ async def test_policy_controls_are_persisted_as_unconfirmed_requests(
     assert request_event.action_name == expected_name
     assert request_event.action_metadata is not None
     assert request_event.action_metadata["request_status"] == "persisted"
+    assert request_event.action_metadata["control_request_id"] == str(
+        fake_db.control_request_id
+    )
     assert request_event.action_metadata["execution_confirmed"] is False
