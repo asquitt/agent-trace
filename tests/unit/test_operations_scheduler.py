@@ -481,6 +481,15 @@ async def test_scheduler_drains_backlog_after_current_run_fails(
 
             return DrainSummary()
 
+        async def cleanup_terminal_deliveries(self, *, org_id: str, limit: int) -> int:
+            assert org_id == "acme"
+            assert limit == 25
+            return 0
+
+        async def durable_failure_count(self, *, org_id: str) -> int:
+            assert org_id == "acme"
+            return 2
+
     async def failing_run_once(
         _self: ObservabilityOperationsScheduler,
         _org_id: str,
@@ -506,6 +515,57 @@ async def test_scheduler_drains_backlog_after_current_run_fails(
 
     assert drain_calls == ["acme"]
     assert scheduler.status()["failed_orgs"] == 1
+    assert scheduler.status()["notification_delivery_failures"] == 2
+
+
+@pytest.mark.asyncio
+async def test_active_leader_maintains_historical_outbox_when_delivery_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    maintenance_calls: list[tuple[str, int]] = []
+
+    class FakeOutbox:
+        async def enqueue_scheduler_run(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("notifications are disabled")
+
+        async def drain_ready(self, **_kwargs: Any) -> Any:
+            raise AssertionError("delivery is disabled")
+
+        async def cleanup_terminal_deliveries(self, *, org_id: str, limit: int) -> int:
+            maintenance_calls.append((org_id, limit))
+            return 1
+
+        async def durable_failure_count(self, *, org_id: str) -> int:
+            assert org_id == "acme"
+            return 1
+
+    async def run_once(
+        _self: ObservabilityOperationsScheduler,
+        org_id: str,
+    ) -> dict[str, Any]:
+        assert org_id == "acme"
+        scheduler._stop.set()  # noqa: SLF001
+        return {"org_id": org_id}
+
+    monkeypatch.setattr(ObservabilityOperationsScheduler, "run_once", run_once)
+    scheduler = ObservabilityOperationsScheduler(
+        _session_factory_stub(),
+        _settings(
+            observability_scheduler_enabled=True,
+            observability_scheduler_org_ids=["acme"],
+            observability_scheduler_enable_notifications=False,
+        ),
+        leadership_lock=_leadership_lock_stub(),
+        durable_fence=_durable_fence_stub(),
+        notification_outbox=cast(Any, FakeOutbox()),
+    )
+
+    await scheduler.start()
+    await asyncio.wait_for(scheduler._stop.wait(), timeout=1)  # noqa: SLF001
+    await scheduler.stop()
+
+    assert maintenance_calls == [("acme", 25)]
+    assert scheduler.status()["notification_delivery_failures"] == 1
 
 
 @pytest.mark.asyncio

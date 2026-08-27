@@ -29,7 +29,7 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime-governance
 - Current validation snapshot:
   - `ruff check --select F src tests` passed
   - `pyright` passed (`0 errors`)
-  - `pytest -q` passed (`166 passed`) against PostgreSQL, including browser-session
+  - `pytest -q` passed (`173 passed`) against PostgreSQL, including browser-session
     persistence, tenant-scoped operator APIs, durable scheduler fencing, runtime controls,
     and transactional notification-outbox delivery
   - operator console `npm test`, TypeScript validation, production build, and npm audit
@@ -73,7 +73,7 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime-governance
 | Multi-agent delegation tracing | Shipped | `POST /api/v1/observability/delegations`, `GET /api/v1/observability/chains/{trace_id}` |
 | Memory consistency monitoring | Shipped | `POST /api/v1/observability/memory/snapshots/batch`, `GET /api/v1/observability/memory/consistency` |
 | Cost analytics and risk insights | Shipped | `GET /api/v1/observability/costs/summary`, `GET /api/v1/observability/insights/risk` |
-| Runtime operations and scheduler visibility | Backend beta; durable database-fenced; scheduled outbound delivery disabled pending outbox | `POST /api/v1/observability/operations/run`, `GET /api/v1/observability/operations/status`, `GET /api/v1/observability/operations/runs` |
+| Runtime operations and scheduler visibility | Backend beta; durable database-fenced; scheduled outbound delivery is config-gated through a tenant-scoped outbox | `POST /api/v1/observability/operations/run`, `GET /api/v1/observability/operations/status`, `GET /api/v1/observability/operations/runs` |
 | Governance audit and SIEM export | Shipped | `GET /api/v1/observability/audit/events`, `POST /api/v1/observability/exports/siem` |
 
 ## Architecture

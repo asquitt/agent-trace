@@ -14,11 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, a
 from ..config import Settings
 from ..models.observability import ObservabilityOperationRun, SystemAuditEvent
 from ..utils.time import utc_now_iso, utc_now_naive
+from .notification_outbox import DrainSummary, NotificationOutboxService
 from .notifications import (
     runtime_event_severity,
     skipped_notification_result,
 )
-from .notification_outbox import DrainSummary, NotificationOutboxService
 from .observability_runtime import (
     DetectorConfig,
     evaluate_budget_policies,
@@ -955,6 +955,14 @@ class ObservabilityOperationsScheduler:
             limit=self._settings.observability_notification_outbox_batch_size,
         )
 
+    async def _maintain_notification_outbox(self, org_id: str) -> tuple[int, int]:
+        cleaned = await self._notification_outbox.cleanup_terminal_deliveries(
+            org_id=org_id,
+            limit=self._settings.observability_notification_outbox_batch_size,
+        )
+        failures = await self._notification_outbox.durable_failure_count(org_id=org_id)
+        return cleaned, failures
+
     async def _run_loop(self) -> None:
         try:
             while not self._stop.is_set():
@@ -998,29 +1006,30 @@ class ObservabilityOperationsScheduler:
                     if not await self._ensure_leadership():
                         leadership_lost = True
                         break
-                    if self._settings.observability_scheduler_enable_notifications:
-                        try:
+                    try:
+                        org_state = self._state["org_runs"].setdefault(org_id, {})
+                        if self._settings.observability_scheduler_enable_notifications:
                             drain = await self._drain_notification_outbox(org_id)
-                            org_state = self._state["org_runs"].setdefault(org_id, {})
                             org_state["last_notification_drain"] = drain.as_dict()
-                            delivery_failures = (
-                                drain.dead_letter + drain.blocked + drain.uncertain
-                            )
-                            notification_delivery_failures += delivery_failures
-                            org_state["last_delivery_error"] = (
-                                "notification_delivery_degraded"
-                                if delivery_failures
-                                else None
-                            )
-                        except Exception as exc:  # pragma: no cover - infrastructure dependent
-                            notification_delivery_failures += 1
-                            org_state = self._state["org_runs"].setdefault(org_id, {})
-                            org_state["last_delivery_error"] = "notification_outbox_worker_failed"
-                            logger.exception(
-                                "notification_outbox_worker_failed",
-                                org_id=org_id,
-                                error_code=type(exc).__name__,
-                            )
+                        cleaned, durable_failures = await self._maintain_notification_outbox(
+                            org_id
+                        )
+                        org_state["last_notification_cleanup_count"] = cleaned
+                        notification_delivery_failures += durable_failures
+                        org_state["last_delivery_error"] = (
+                            "notification_delivery_degraded"
+                            if durable_failures
+                            else None
+                        )
+                    except Exception as exc:  # pragma: no cover - infrastructure dependent
+                        notification_delivery_failures += 1
+                        org_state = self._state["org_runs"].setdefault(org_id, {})
+                        org_state["last_delivery_error"] = "notification_outbox_worker_failed"
+                        logger.exception(
+                            "notification_outbox_worker_failed",
+                            org_id=org_id,
+                            error_code=type(exc).__name__,
+                        )
                     # Network work may outlive a heartbeat; re-verify before next org.
                     if not await self._ensure_leadership():
                         leadership_lost = True

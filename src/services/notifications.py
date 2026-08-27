@@ -8,11 +8,13 @@ import hmac
 import ipaddress
 import json
 import socket
-from collections.abc import Sequence
+import time
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 
+import httpcore
 import httpx
 import structlog
 from pydantic import SecretStr
@@ -91,6 +93,20 @@ class NotificationTargetSet:
     webhooks: list[str]
     slack_webhooks: list[str]
     pagerduty_routing_keys: list[str]
+
+
+@dataclass(frozen=True)
+class ResolvedNotificationTarget:
+    """A validated target paired with the exact public addresses it resolved to."""
+
+    url: str
+    hostname: str
+    port: int
+    addresses: tuple[str, ...]
+
+
+class NotificationDNSUnavailableError(OSError):
+    """Raised when a target cannot be resolved before any request is attempted."""
 
 
 def notification_secret_values(values: Sequence[str | SecretStr]) -> list[str]:
@@ -218,20 +234,180 @@ def validate_notification_https_target(target: str, allowed_hosts: list[str]) ->
     raise ValueError("notification target must use a DNS hostname")
 
 
-async def validate_notification_public_dns(target: str) -> None:
-    """Reject targets that resolve to any non-public address."""
-    hostname = urlsplit(target).hostname
+async def resolve_notification_public_target(target: str) -> ResolvedNotificationTarget:
+    """Resolve a target once and retain only an all-public address set."""
+    parsed = urlsplit(target)
+    hostname = parsed.hostname
     if not hostname:
         raise ValueError("notification target has no hostname")
-    addresses = await asyncio.get_running_loop().getaddrinfo(
-        hostname,
-        443,
-        family=socket.AF_UNSPEC,
-        type=socket.SOCK_STREAM,
-    )
-    resolved = {item[4][0] for item in addresses}
-    if not resolved or any(not ipaddress.ip_address(address).is_global for address in resolved):
+    try:
+        hostname = hostname.encode("idna").decode("ascii").lower().rstrip(".")
+    except UnicodeError as exc:
+        raise ValueError("notification target hostname is invalid") from exc
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise ValueError("notification target has an invalid port") from exc
+    try:
+        addresses = await asyncio.get_running_loop().getaddrinfo(
+            hostname,
+            port,
+            family=socket.AF_UNSPEC,
+            type=socket.SOCK_STREAM,
+        )
+    except OSError as exc:
+        raise NotificationDNSUnavailableError("notification target DNS is unavailable") from exc
+    resolved = {
+        ipaddress.ip_address(item[4][0]).compressed
+        for item in addresses
+    }
+    if not resolved:
+        raise NotificationDNSUnavailableError("notification target DNS is unavailable")
+    if any(not ipaddress.ip_address(address).is_global for address in resolved):
         raise ValueError("notification target did not resolve exclusively to public addresses")
+    return ResolvedNotificationTarget(
+        url=target,
+        hostname=hostname,
+        port=port,
+        addresses=tuple(
+            sorted(
+                resolved,
+                key=lambda address: (
+                    ipaddress.ip_address(address).version,
+                    ipaddress.ip_address(address).packed,
+                ),
+            )
+        ),
+    )
+
+
+async def validate_notification_public_dns(target: str) -> None:
+    """Reject targets that resolve to any non-public address."""
+    await resolve_notification_public_target(target)
+
+
+class _PinnedAsyncNetworkBackend(httpcore.AsyncNetworkBackend):
+    """Connect an HTTP origin only through its frozen validated address set."""
+
+    def __init__(self, resolved: ResolvedNotificationTarget) -> None:
+        self._hostname = resolved.hostname.lower().rstrip(".")
+        self._port = resolved.port
+        self._addresses = tuple(
+            ipaddress.ip_address(address).compressed for address in resolved.addresses
+        )
+        if not self._addresses or any(
+            not ipaddress.ip_address(address).is_global for address in self._addresses
+        ):
+            raise ValueError("notification transport requires public addresses")
+        self._delegate = cast(httpcore.AsyncNetworkBackend, httpcore.AnyIOBackend())
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Any = None,
+    ) -> httpcore.AsyncNetworkStream:
+        if host.lower().rstrip(".") != self._hostname or port != self._port:
+            raise httpcore.ConnectError("notification transport origin mismatch")
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        last_error: Exception | None = None
+        for address in self._addresses:
+            remaining = None if deadline is None else max(deadline - time.monotonic(), 0.0)
+            if remaining == 0.0:
+                raise httpcore.ConnectTimeout("notification connect timeout")
+            try:
+                return await self._delegate.connect_tcp(
+                    host=address,
+                    port=port,
+                    timeout=remaining,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise httpcore.ConnectError("notification transport has no addresses")
+
+    async def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Any = None,
+    ) -> httpcore.AsyncNetworkStream:
+        _ = (path, timeout, socket_options)
+        raise httpcore.ConnectError("notification transport forbids unix sockets")
+
+    async def sleep(self, seconds: float) -> None:
+        await self._delegate.sleep(seconds)
+
+
+class _PinnedResponseStream(httpx.AsyncByteStream):
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        async for part in self._stream:
+            yield part
+
+    async def aclose(self) -> None:
+        await self._stream.aclose()
+
+
+class _PinnedAsyncTransport(httpx.AsyncBaseTransport):
+    """HTTPX transport backed by a frozen-address HTTPcore pool."""
+
+    def __init__(self, resolved: ResolvedNotificationTarget) -> None:
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=httpcore.default_ssl_context(),
+            max_connections=1,
+            max_keepalive_connections=0,
+            network_backend=_PinnedAsyncNetworkBackend(resolved),
+        )
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        response = await self._pool.handle_async_request(
+            httpcore.Request(
+                method=request.method,
+                url=httpcore.URL(
+                    scheme=request.url.raw_scheme,
+                    host=request.url.raw_host,
+                    port=request.url.port,
+                    target=request.url.raw_path,
+                ),
+                headers=request.headers.raw,
+                content=request.stream,
+                extensions=request.extensions,
+            )
+        )
+        return httpx.Response(
+            status_code=response.status,
+            headers=response.headers,
+            stream=_PinnedResponseStream(response.stream),
+            extensions=response.extensions,
+        )
+
+    async def aclose(self) -> None:
+        await self._pool.aclose()
+
+
+async def post_json_to_resolved_target(
+    *,
+    resolved: ResolvedNotificationTarget,
+    body: dict[str, Any],
+    headers: dict[str, str] | None = None,
+    timeout_seconds: float,
+) -> httpx.Response:
+    """POST to a validated IP while retaining hostname TLS and HTTP identity."""
+    async with httpx.AsyncClient(
+        transport=_PinnedAsyncTransport(resolved),
+        timeout=timeout_seconds,
+        follow_redirects=False,
+        trust_env=False,
+    ) as client:
+        return await client.post(resolved.url, json=body, headers=headers or {})
 
 
 def sanitize_runtime_notification_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -409,26 +585,41 @@ def _pagerduty_payload_with_dedup(
 
 
 async def _post_json_with_retry(
-    client: httpx.AsyncClient,
     *,
     target: str,
     body: dict[str, Any],
     max_attempts: int,
     retry_backoff_seconds: float,
+    idempotency_supported: bool,
+    timeout_seconds: float,
     headers: dict[str, str] | None = None,
 ) -> tuple[bool, str | None]:
     attempt_limit = max(max_attempts, 1)
     for attempt in range(1, attempt_limit + 1):
         try:
-            response = await client.post(target, json=body, headers=headers or {})
+            resolved = await resolve_notification_public_target(target)
+        except NotificationDNSUnavailableError:
+            if attempt < attempt_limit:
+                await asyncio.sleep(retry_backoff_seconds * attempt)
+                continue
+            return False, "dns_unavailable"
+        except ValueError:
+            return False, "target_policy_rejected"
+        try:
+            response = await post_json_to_resolved_target(
+                resolved=resolved,
+                body=body,
+                headers=headers,
+                timeout_seconds=timeout_seconds,
+            )
             if 200 <= response.status_code < 300:
                 return True, None
-            if attempt < attempt_limit:
+            if idempotency_supported and attempt < attempt_limit:
                 await asyncio.sleep(retry_backoff_seconds * attempt)
             else:
                 return False, f"http_status:{response.status_code}"
         except Exception as exc:  # pragma: no cover - network dependent
-            if attempt < attempt_limit:
+            if idempotency_supported and attempt < attempt_limit:
                 await asyncio.sleep(retry_backoff_seconds * attempt)
                 continue
             error_code = type(exc).__name__
@@ -486,7 +677,6 @@ async def send_runtime_notifications(
                 valid_webhooks.append(
                     validate_notification_https_target(target, allowed_hosts)
                 )
-                await validate_notification_public_dns(target)
             except ValueError:
                 validation_errors += 1
                 validation_failures_by_channel["webhook"] += 1
@@ -500,7 +690,6 @@ async def send_runtime_notifications(
                     "/services/"
                 ):
                     raise ValueError("invalid Slack webhook target")
-                await validate_notification_public_dns(validated)
                 valid_slack.append(validated)
             except ValueError:
                 validation_errors += 1
@@ -535,12 +724,7 @@ async def send_runtime_notifications(
     attempted += validation_errors
     errors.extend(["target_policy_rejected"] * validation_errors)
 
-    async with httpx.AsyncClient(
-        timeout=timeout_seconds,
-        follow_redirects=False,
-        trust_env=False,
-    ) as client:
-        for target in webhook_targets:
+    for target in webhook_targets:
             attempted += 1
             channel_stats["webhook"]["attempted"] += 1
             idempotency_key = (
@@ -549,11 +733,12 @@ async def send_runtime_notifications(
                 else None
             )
             delivered, error = await _post_json_with_retry(
-                client,
                 target=target,
                 body=payload,
-                max_attempts=max_attempts if idempotency_key else 1,
+                max_attempts=max_attempts,
                 retry_backoff_seconds=retry_backoff_seconds,
+                idempotency_supported=idempotency_key is not None,
+                timeout_seconds=timeout_seconds,
                 headers={"Idempotency-Key": idempotency_key} if idempotency_key else None,
             )
             if delivered:
@@ -565,16 +750,17 @@ async def send_runtime_notifications(
                 if error:
                     errors.append(error)
 
-        slack_payload = _slack_payload(payload)
-        for target in slack_targets:
+    slack_payload = _slack_payload(payload)
+    for target in slack_targets:
             attempted += 1
             channel_stats["slack"]["attempted"] += 1
             delivered, error = await _post_json_with_retry(
-                client,
                 target=target,
                 body=slack_payload,
-                max_attempts=1,
+                max_attempts=max_attempts,
                 retry_backoff_seconds=retry_backoff_seconds,
+                idempotency_supported=False,
+                timeout_seconds=timeout_seconds,
             )
             if delivered:
                 succeeded += 1
@@ -585,20 +771,21 @@ async def send_runtime_notifications(
                 if error:
                     errors.append(error)
 
-        for routing_key in pagerduty_keys:
+    for routing_key in pagerduty_keys:
             attempted += 1
             channel_stats["pagerduty"]["attempted"] += 1
             idempotency_key = request_idempotency_key("pagerduty", routing_key)
             delivered, error = await _post_json_with_retry(
-                client,
                 target=PAGERDUTY_EVENTS_V2_URL,
                 body=_pagerduty_payload_with_dedup(
                     payload,
                     routing_key,
                     dedup_key=idempotency_key,
                 ),
-                max_attempts=max_attempts if idempotency_key else 1,
+                max_attempts=max_attempts,
                 retry_backoff_seconds=retry_backoff_seconds,
+                idempotency_supported=idempotency_key is not None,
+                timeout_seconds=timeout_seconds,
             )
             if delivered:
                 succeeded += 1

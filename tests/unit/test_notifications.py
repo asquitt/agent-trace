@@ -1,7 +1,6 @@
 """Tests for notification helper functions."""
 
 import asyncio
-
 from typing import Any
 
 import pytest
@@ -9,17 +8,18 @@ import pytest
 from src.services import notifications as notifications_service
 from src.services.notifications import (
     PAGERDUTY_EVENTS_V2_URL,
+    ResolvedNotificationTarget,
     base_notification_result,
     classify_notification_targets,
     collect_policy_notification_target_strings,
     collect_policy_notification_targets,
     merge_runtime_notification_targets,
-    notification_target_fingerprint,
     normalize_webhook_targets,
+    notification_target_fingerprint,
     runtime_event_severity,
     runtime_notification_gate_result,
-    send_runtime_notifications,
     sanitize_runtime_notification_payload,
+    send_runtime_notifications,
     severity_rank,
     skipped_notification_result,
     validate_notification_https_target,
@@ -315,16 +315,19 @@ async def test_send_runtime_notifications_routes_all_channels(monkeypatch) -> No
     calls: list[tuple[str, dict[str, Any]]] = []
 
     async def fake_post_json_with_retry(
-        _client: Any,
         *,
         target: str,
         body: dict[str, Any],
         max_attempts: int,
         retry_backoff_seconds: float,
+        idempotency_supported: bool,
+        timeout_seconds: float,
         headers: dict[str, str] | None = None,
     ) -> tuple[bool, str | None]:
-        assert max_attempts == 1
+        assert max_attempts == 2
         assert retry_backoff_seconds == 0.25
+        assert idempotency_supported is False
+        assert timeout_seconds == 5.0
         assert headers is None
         calls.append((target, body))
         return True, None
@@ -405,12 +408,13 @@ async def test_manual_retry_uses_stable_receiver_idempotency_contract(monkeypatc
     calls: list[dict[str, Any]] = []
 
     async def fake_post(
-        _client: Any,
         *,
         target: str,
         body: dict[str, Any],
         max_attempts: int,
         retry_backoff_seconds: float,
+        idempotency_supported: bool,
+        timeout_seconds: float,
         headers: dict[str, str] | None = None,
     ) -> tuple[bool, str | None]:
         calls.append(
@@ -419,6 +423,8 @@ async def test_manual_retry_uses_stable_receiver_idempotency_contract(monkeypatc
                 "body": body,
                 "max_attempts": max_attempts,
                 "backoff": retry_backoff_seconds,
+                "idempotency_supported": idempotency_supported,
+                "timeout_seconds": timeout_seconds,
                 "headers": headers,
             }
         )
@@ -441,6 +447,125 @@ async def test_manual_retry_uses_stable_receiver_idempotency_contract(monkeypatc
         call for call in calls if call["target"] == PAGERDUTY_EVENTS_V2_URL
     )
     assert webhook_call["max_attempts"] == 3
+    assert webhook_call["idempotency_supported"] is True
     assert len(webhook_call["headers"]["Idempotency-Key"]) == 64
     assert pagerduty_call["max_attempts"] == 3
+    assert pagerduty_call["idempotency_supported"] is True
     assert len(pagerduty_call["body"]["dedup_key"]) == 64
+
+
+@pytest.mark.asyncio
+async def test_pinned_transport_preserves_origin_and_uses_only_validated_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connected: list[tuple[str, int]] = []
+    tls_hosts: list[str | None] = []
+    writes: list[bytes] = []
+
+    class FakeStream:
+        def __init__(self) -> None:
+            self._reads = [b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n"]
+
+        async def read(self, _max_bytes: int, timeout: float | None = None) -> bytes:
+            _ = timeout
+            return self._reads.pop(0) if self._reads else b""
+
+        async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+            _ = timeout
+            writes.append(buffer)
+
+        async def aclose(self) -> None:
+            return None
+
+        async def start_tls(
+            self,
+            ssl_context: Any,
+            server_hostname: str | None = None,
+            timeout: float | None = None,
+        ) -> Any:
+            _ = (ssl_context, timeout)
+            tls_hosts.append(server_hostname)
+            return self
+
+        def get_extra_info(self, _info: str) -> Any:
+            return None
+
+    class FakeBackend:
+        async def connect_tcp(
+            self,
+            host: str,
+            port: int,
+            **_kwargs: Any,
+        ) -> Any:
+            connected.append((host, port))
+            return FakeStream()
+
+        async def sleep(self, _seconds: float) -> None:
+            return None
+
+    monkeypatch.setattr(
+        notifications_service.httpcore,
+        "AnyIOBackend",
+        lambda: FakeBackend(),
+    )
+    resolved = ResolvedNotificationTarget(
+        url="https://hooks.example.com/private/path?event=1",
+        hostname="hooks.example.com",
+        port=443,
+        addresses=("93.184.216.34",),
+    )
+
+    response = await notifications_service.post_json_to_resolved_target(
+        resolved=resolved,
+        body={"event": "test"},
+        timeout_seconds=1,
+    )
+
+    assert response.status_code == 202
+    assert connected == [("93.184.216.34", 443)]
+    assert tls_hosts == ["hooks.example.com"]
+    wire = b"".join(writes)
+    assert b"Host: hooks.example.com" in wire
+    assert b"93.184.216.34" not in wire
+
+
+@pytest.mark.asyncio
+async def test_manual_dns_failure_retries_before_any_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolutions = 0
+    posts = 0
+
+    async def resolve(target: str) -> ResolvedNotificationTarget:
+        nonlocal resolutions
+        resolutions += 1
+        if resolutions < 3:
+            raise notifications_service.NotificationDNSUnavailableError("safe")
+        return ResolvedNotificationTarget(
+            url=target,
+            hostname="hooks.example.com",
+            port=443,
+            addresses=("93.184.216.34",),
+        )
+
+    async def post(**_kwargs: Any) -> Any:
+        nonlocal posts
+        posts += 1
+        return type("Response", (), {"status_code": 202})()
+
+    monkeypatch.setattr(notifications_service, "resolve_notification_public_target", resolve)
+    monkeypatch.setattr(notifications_service, "post_json_to_resolved_target", post)
+
+    delivered, error = await notifications_service._post_json_with_retry(
+        target="https://hooks.example.com/path",
+        body={"event": "test"},
+        max_attempts=3,
+        retry_backoff_seconds=0,
+        idempotency_supported=False,
+        timeout_seconds=1,
+    )
+
+    assert delivered is True
+    assert error is None
+    assert resolutions == 3
+    assert posts == 1

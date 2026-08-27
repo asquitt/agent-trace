@@ -11,7 +11,6 @@ from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-import httpx
 import structlog
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -28,15 +27,17 @@ from ..models.observability import (
 from ..utils.time import utc_now_naive
 from .notifications import (
     PAGERDUTY_EVENTS_V2_URL,
+    NotificationDNSUnavailableError,
     _pagerduty_payload_with_dedup,
     _slack_payload,
     classify_notification_targets,
     notification_secret_values,
     notification_target_fingerprint,
+    post_json_to_resolved_target,
+    resolve_notification_public_target,
     runtime_event_severity,
     runtime_notification_gate_result,
     sanitize_runtime_notification_payload,
-    validate_notification_public_dns,
     validate_notification_https_target,
 )
 
@@ -338,7 +339,13 @@ class NotificationOutboxService:
             "event_severity": severity,
         }
 
-    async def _recover_expired_claims(self, session: AsyncSession, org_id: str) -> None:
+    async def _recover_expired_claims(
+        self,
+        session: AsyncSession,
+        org_id: str,
+        *,
+        limit: int,
+    ) -> int:
         now = utc_now_naive()
         expired = list(
             (
@@ -350,15 +357,22 @@ class NotificationOutboxService:
                         == NotificationDeliveryStatus.PROCESSING.value,
                         NotificationDelivery.claim_expires_at <= now,
                     )
+                    .order_by(
+                        NotificationDelivery.claim_expires_at.asc(),
+                        NotificationDelivery.id.asc(),
+                    )
+                    .limit(limit)
                     .with_for_update(skip_locked=True)
                 )
             ).scalars()
         )
+        affected_run_ids: set[UUID] = set()
         for delivery in expired:
             attempt = (
                 await session.execute(
                     select(NotificationDeliveryAttempt)
                     .where(
+                        NotificationDeliveryAttempt.org_id == org_id,
                         NotificationDeliveryAttempt.delivery_id == delivery.id,
                         NotificationDeliveryAttempt.completed_at.is_(None),
                     )
@@ -385,17 +399,73 @@ class NotificationOutboxService:
                 attempt.completed_at = now
                 attempt.outcome = outcome
                 attempt.error_code = outcome
+            affected_run_ids.add(delivery.operation_run_id)
+            session.add(
+                SystemAuditEvent(
+                    occurred_at=now,
+                    actor_subject="system:notification-outbox",
+                    actor_roles=["system"],
+                    org_id=org_id,
+                    action="notification_delivery_recovered",
+                    resource_type="notification_delivery",
+                    resource_id=str(delivery.id),
+                    request_id=None,
+                    success=False,
+                    details={
+                        "channel": delivery.channel,
+                        "status": delivery.status,
+                        "outcome": outcome,
+                        "attempt_number": delivery.attempt_count,
+                        "delivery_semantics": "endpoint_acceptance",
+                    },
+                )
+            )
+        await session.flush()
+        for run_id in sorted(affected_run_ids, key=str):
+            run = (
+                await session.execute(
+                    select(ObservabilityOperationRun)
+                    .where(
+                        ObservabilityOperationRun.id == run_id,
+                        ObservabilityOperationRun.org_id == org_id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if run is not None:
+                run.notification_summary = await self._summary_for_run(
+                    session,
+                    run_id,
+                    org_id=org_id,
+                )
+        return len(expired)
 
-    async def claim_ready(self, *, org_id: str, limit: int, worker_id: str) -> list[ClaimedNotification]:
+    async def recover_expired_claims(self, *, org_id: str, limit: int) -> int:
+        """Recover a bounded set of expired claims with durable truth updates."""
+        async with self._session_factory() as session:
+            async with session.begin():
+                return await self._recover_expired_claims(
+                    session,
+                    org_id,
+                    limit=limit,
+                )
+
+    async def claim_ready(
+        self,
+        *,
+        org_id: str,
+        limit: int,
+        worker_id: str,
+        recover_expired: bool = True,
+    ) -> list[ClaimedNotification]:
         """Claim due deliveries and create attempt evidence in one short transaction."""
         claimed: list[ClaimedNotification] = []
         # Commit expired-claim recovery before selecting new work. PostgreSQL may
         # otherwise omit a row whose indexed status changed earlier in the same
         # SKIP LOCKED statement transaction; a competing worker can safely win the
         # subsequent claim because that claim is independently locked.
-        async with self._session_factory() as recovery_session:
-            async with recovery_session.begin():
-                await self._recover_expired_claims(recovery_session, org_id)
+        if recover_expired:
+            await self.recover_expired_claims(org_id=org_id, limit=limit)
         now = utc_now_naive()
         async with self._session_factory() as session:
             async with session.begin():
@@ -521,7 +591,6 @@ class NotificationOutboxService:
                             "/services/"
                         ):
                             raise ValueError("invalid Slack webhook target")
-                    await validate_notification_public_dns(target)
                 return target
         return None
 
@@ -566,6 +635,7 @@ class NotificationOutboxService:
                         select(NotificationDeliveryAttempt)
                         .where(
                             NotificationDeliveryAttempt.id == claim.attempt_id,
+                            NotificationDeliveryAttempt.org_id == claim.org_id,
                             NotificationDeliveryAttempt.delivery_id == claim.delivery_id,
                             NotificationDeliveryAttempt.worker_id == worker_id,
                             NotificationDeliveryAttempt.completed_at.is_(None),
@@ -634,13 +704,23 @@ class NotificationOutboxService:
                 run.notification_summary = await self._summary_for_run(
                     session,
                     delivery.operation_run_id,
+                    org_id=claim.org_id,
                 )
 
-    async def _summary_for_run(self, session: AsyncSession, run_id: UUID) -> dict[str, Any]:
+    async def _summary_for_run(
+        self,
+        session: AsyncSession,
+        run_id: UUID,
+        *,
+        org_id: str,
+    ) -> dict[str, Any]:
         rows = (
             await session.execute(
                 select(NotificationDelivery.status, func.count(NotificationDelivery.id))
-                .where(NotificationDelivery.operation_run_id == run_id)
+                .where(
+                    NotificationDelivery.operation_run_id == run_id,
+                    NotificationDelivery.org_id == org_id,
+                )
                 .group_by(NotificationDelivery.status)
             )
         ).all()
@@ -659,14 +739,13 @@ class NotificationOutboxService:
 
     async def _deliver_one(
         self,
-        client: httpx.AsyncClient,
         claim: ClaimedNotification,
         *,
         worker_id: str,
     ) -> str:
         try:
             target = await self._resolve_target(claim)
-        except (OSError, ValueError):
+        except ValueError:
             await self._finalize(
                 claim,
                 worker_id=worker_id,
@@ -701,7 +780,38 @@ class NotificationOutboxService:
             headers["Idempotency-Key"] = claim.idempotency_key
 
         try:
-            response = await client.post(post_target, json=body, headers=headers)
+            resolved = await resolve_notification_public_target(post_target)
+        except NotificationDNSUnavailableError:
+            status = (
+                NotificationDeliveryStatus.RETRY_SCHEDULED.value
+                if claim.attempt_number < claim.max_attempts
+                else NotificationDeliveryStatus.DEAD_LETTER.value
+            )
+            await self._finalize(
+                claim,
+                worker_id=worker_id,
+                status=status,
+                outcome="dns_unavailable",
+                error_code="dns_unavailable",
+            )
+            return status
+        except ValueError:
+            await self._finalize(
+                claim,
+                worker_id=worker_id,
+                status=NotificationDeliveryStatus.BLOCKED.value,
+                outcome="target_policy_rejected",
+                error_code="target_policy_rejected",
+            )
+            return NotificationDeliveryStatus.BLOCKED.value
+
+        try:
+            response = await post_json_to_resolved_target(
+                resolved=resolved,
+                body=body,
+                headers=headers,
+                timeout_seconds=self._settings.observability_notification_timeout_seconds,
+            )
         except Exception as exc:  # network outcome is ambiguous
             status = self._retry_status(claim)
             error_code = f"transport_{type(exc).__name__}"
@@ -751,20 +861,26 @@ class NotificationOutboxService:
         return status
 
     async def drain_ready(self, *, org_id: str, limit: int) -> DrainSummary:
-        """Deliver one claimed batch; network calls occur with no DB transaction open."""
+        """Claim each row immediately before delivery; never lease a serial batch."""
         worker_id = str(uuid4())
-        claims = await self.claim_ready(org_id=org_id, limit=limit, worker_id=worker_id)
         counts: Counter[str] = Counter()
-        async with httpx.AsyncClient(
-            timeout=self._settings.observability_notification_timeout_seconds,
-            follow_redirects=False,
-            trust_env=False,
-        ) as client:
-            for claim in claims:
-                status = await self._deliver_one(client, claim, worker_id=worker_id)
-                counts[status] += 1
+        claimed_count = 0
+        await self.recover_expired_claims(org_id=org_id, limit=limit)
+        for _ in range(limit):
+            claims = await self.claim_ready(
+                org_id=org_id,
+                limit=1,
+                worker_id=worker_id,
+                recover_expired=False,
+            )
+            if not claims:
+                break
+            claim = claims[0]
+            claimed_count += 1
+            status = await self._deliver_one(claim, worker_id=worker_id)
+            counts[status] += 1
         return DrainSummary(
-            claimed=len(claims),
+            claimed=claimed_count,
             accepted=counts[NotificationDeliveryStatus.ACCEPTED.value],
             retry_scheduled=counts[NotificationDeliveryStatus.RETRY_SCHEDULED.value],
             dead_letter=counts[NotificationDeliveryStatus.DEAD_LETTER.value],
@@ -772,7 +888,25 @@ class NotificationOutboxService:
             uncertain=counts[NotificationDeliveryStatus.UNCERTAIN.value],
         )
 
-    async def cleanup_terminal_deliveries(self, *, org_id: str) -> int:
+    async def durable_failure_count(self, *, org_id: str) -> int:
+        """Count durable terminal outcomes that require operator attention."""
+        async with self._session_factory() as session:
+            count = await session.scalar(
+                select(func.count(NotificationDelivery.id)).where(
+                    NotificationDelivery.org_id == org_id,
+                    NotificationDelivery.status.in_(
+                        [
+                            NotificationDeliveryStatus.DEAD_LETTER.value,
+                            NotificationDeliveryStatus.BLOCKED.value,
+                            NotificationDeliveryStatus.UNCERTAIN.value,
+                        ]
+                    ),
+                )
+            )
+            await session.rollback()
+        return int(count or 0)
+
+    async def cleanup_terminal_deliveries(self, *, org_id: str, limit: int) -> int:
         """Delete only conclusively terminal rows beyond the retention boundary."""
         cutoff = utc_now_naive() - timedelta(
             days=self._settings.observability_notification_retention_days
@@ -795,6 +929,11 @@ class NotificationOutboxService:
                                 ),
                                 NotificationDelivery.terminal_at < cutoff,
                             )
+                            .order_by(
+                                NotificationDelivery.terminal_at.asc(),
+                                NotificationDelivery.id.asc(),
+                            )
+                            .limit(limit)
                             .with_for_update(skip_locked=True)
                         )
                     ).scalars()
