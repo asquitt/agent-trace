@@ -29,9 +29,9 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime-governance
 - Current validation snapshot:
   - `ruff check --select F src tests` passed
   - `pyright` passed (`0 errors`)
-  - `pytest -q` passed (`146 passed`) against PostgreSQL, including browser-session
-    persistence, tenant-scoped operator APIs, durable scheduler fencing, and fail-closed
-    notification persistence
+  - `pytest -q` passed (`177 passed`) against PostgreSQL, including browser-session
+    persistence, tenant-scoped operator APIs, durable scheduler fencing, runtime controls,
+    and transactional notification-outbox delivery
   - operator console `npm test`, TypeScript validation, production build, and npm audit
     passed (`6 tests`, zero known vulnerabilities)
   - the fail-closed security gate passed against 69 exact hash-locked runtime and build
@@ -45,9 +45,9 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime-governance
   - provider-neutral runtime `shutdown`/`throttle` delivery and acknowledgement are
     implemented and locally exact-image verified, but no customer runtime integration or
     hosted environment has been verified
-  - automated scheduler outbound notifications are intentionally fail-closed until a
-    durable, idempotent outbox/claim path exists; scheduled runs persist a zero-attempt
-    notification summary with `skip_reason=durable_outbox_required`
+  - scheduled notification delivery now uses a transactional, tenant-scoped outbox with
+    short claims, secret-free persistence, destination re-resolution, and endpoint-
+    acceptance truth; hosted receivers and customer alert journeys remain unverified
   - retained February 14 E2E, performance, DR, and security reports are historical
     evidence, not validation of the current release candidate; the old security report
     is specifically invalid because its permissive threshold allowed a non-zero audit
@@ -73,7 +73,7 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime-governance
 | Multi-agent delegation tracing | Shipped | `POST /api/v1/observability/delegations`, `GET /api/v1/observability/chains/{trace_id}` |
 | Memory consistency monitoring | Shipped | `POST /api/v1/observability/memory/snapshots/batch`, `GET /api/v1/observability/memory/consistency` |
 | Cost analytics and risk insights | Shipped | `GET /api/v1/observability/costs/summary`, `GET /api/v1/observability/insights/risk` |
-| Runtime operations and scheduler visibility | Backend beta; durable database-fenced; scheduled outbound delivery disabled pending outbox | `POST /api/v1/observability/operations/run`, `GET /api/v1/observability/operations/status`, `GET /api/v1/observability/operations/runs` |
+| Runtime operations and scheduler visibility | Backend beta; durable database-fenced; scheduled outbound delivery is config-gated through a tenant-scoped outbox | `POST /api/v1/observability/operations/run`, `GET /api/v1/observability/operations/status`, `GET /api/v1/observability/operations/runs` |
 | Governance audit and SIEM export | Shipped | `GET /api/v1/observability/audit/events`, `POST /api/v1/observability/exports/siem` |
 
 ## Architecture
@@ -275,9 +275,12 @@ Manually triggered runtime operations and SIEM exports support mixed target form
 - PagerDuty routing key: `pagerduty:<routing_key>`
 
 For SIEM export payloads, `notification_targets` is preferred. Legacy `target_webhook` remains supported.
-The background scheduler does not perform outbound delivery. Even when
-`OBSERVABILITY_SCHEDULER_ENABLE_NOTIFICATIONS=true`, it fails closed and records
-`durable_outbox_required`; this flag is reserved until a transactional outbox ships.
+The background scheduler transactionally enqueues sanitized payloads and secret-free
+destination references, then its active leader claims and sends after commit. Generic
+webhooks must use an exact allowlisted HTTPS host. PagerDuty uses a stable `dedup_key`;
+generic receivers listed in `OBSERVABILITY_NOTIFICATION_IDEMPOTENT_WEBHOOKS` receive a
+stable `Idempotency-Key`; ambiguous non-idempotent outcomes become `uncertain` and are
+not automatically retried.
 
 ## Runtime Control Delivery
 
@@ -342,7 +345,7 @@ evidence for that profile, not a universal production sizing rule.
 - `OBSERVABILITY_SCHEDULER_EXECUTE_POLICY_ACTIONS`
 - `RUNTIME_CONTROL_LEASE_SECONDS`
 - `RUNTIME_CONTROL_MAX_DELIVERY_ATTEMPTS`
-- `OBSERVABILITY_SCHEDULER_ENABLE_NOTIFICATIONS` (reserved; must remain `false`)
+- `OBSERVABILITY_SCHEDULER_ENABLE_NOTIFICATIONS`
 - `OBSERVABILITY_DETECTOR_ANOMALY_DEDUPE_WINDOW_MINUTES`
 - `OBSERVABILITY_DETECTOR_ANOMALY_REOPEN_ACKNOWLEDGED`
 
@@ -351,11 +354,17 @@ evidence for that profile, not a universal production sizing rule.
 - `OBSERVABILITY_NOTIFICATION_WEBHOOKS`
 - `OBSERVABILITY_NOTIFICATION_SLACK_WEBHOOKS`
 - `OBSERVABILITY_NOTIFICATION_PAGERDUTY_ROUTING_KEYS`
+- `OBSERVABILITY_NOTIFICATION_ALLOWED_HOSTS`
+- `OBSERVABILITY_NOTIFICATION_IDEMPOTENT_WEBHOOKS`
+- `OBSERVABILITY_NOTIFICATION_FINGERPRINT_KEY`
 - `OBSERVABILITY_NOTIFICATION_MIN_SEVERITY`
 - `OBSERVABILITY_NOTIFICATION_ONLY_ON_ACTIONABLE`
 - `OBSERVABILITY_NOTIFICATION_TIMEOUT_SECONDS`
 - `OBSERVABILITY_NOTIFICATION_MAX_ATTEMPTS`
 - `OBSERVABILITY_NOTIFICATION_RETRY_BACKOFF_SECONDS`
+- `OBSERVABILITY_NOTIFICATION_OUTBOX_BATCH_SIZE`
+- `OBSERVABILITY_NOTIFICATION_CLAIM_SECONDS`
+- `OBSERVABILITY_NOTIFICATION_RETENTION_DAYS`
 
 ### Shutdown safety
 
@@ -374,9 +383,11 @@ evidence for that profile, not a universal production sizing rule.
    session cookies.
 2. Use managed Postgres/Redis with backups, restore drills, and secret rotation.
 3. Run migrations as part of deployment rollout.
-4. Scope scheduler orgs explicitly. Configure notification channels only for manual
-   runtime/SIEM dispatch, and keep scheduler outbound notifications disabled until the
-   durable outbox ships.
+4. Scope scheduler orgs explicitly. Before enabling scheduled notifications, configure
+   a 32-byte-or-longer fingerprint key, exact HTTPS host allowlist, at least one channel,
+   and a claim window at least five seconds longer than the total outbound-attempt
+   timeout. Treat `accepted` as receiver
+   endpoint acceptance, not human delivery.
 5. Require approval for shutdown control requests.
 6. Wire `/health/live`, `/health/ready`, and `/metrics` into orchestration and alerting.
 7. Export SIEM bundles into security analytics workflows.
@@ -407,6 +418,10 @@ docker build -f docker/Dockerfile .
 - Browser sessions store only token hashes, are tenant/role scoped at creation, require
   CSRF validation for unsafe methods, and attribute mutations to the authenticated subject.
 - Shutdown delivery is approval-gated, lease-bound, runtime-acknowledged, and audited.
+- Scheduled notifications are transactionally enqueued with detector/policy work. The
+  worker resolves current secrets by keyed fingerprint, performs network I/O outside DB
+  transactions, and records `accepted`, retry, terminal, or `uncertain` outcomes without
+  changing the completed run's success truth.
 - System-level audit events are persisted and queryable for governance and incident review.
 - SIEM export supports anomaly, policy, operations, and audit bundles for external retention.
 
@@ -415,7 +430,7 @@ docker build -f docker/Dockerfile .
 Near-term focus areas:
 
 - First-class deployment-scoped runtime principals and credential lifecycle administration
-- Durable, idempotent scheduled notification delivery
+- Hosted notification-receiver and on-call journey evidence
 - Hosted console deployment, public identity, and customer-journey evidence
 - SSO, user provisioning, and API-key lifecycle administration
 - Longer-horizon anomaly baselines and seasonality-aware detection

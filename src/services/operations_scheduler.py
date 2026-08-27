@@ -8,12 +8,13 @@ from typing import Any, AsyncContextManager, AsyncIterator, Protocol
 from uuid import uuid4
 
 import structlog
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
 from ..config import Settings
 from ..models.observability import ObservabilityOperationRun, SystemAuditEvent
 from ..utils.time import utc_now_iso, utc_now_naive
+from .notification_outbox import DrainSummary, NotificationOutboxService
 from .notifications import (
     runtime_event_severity,
     skipped_notification_result,
@@ -120,6 +121,7 @@ _PUBLIC_SCHEDULER_STATUS_KEYS = (
     "interval_seconds",
     "org_count",
     "failed_orgs",
+    "notification_delivery_failures",
 )
 
 
@@ -139,6 +141,7 @@ def public_scheduler_status(scheduler: Any) -> dict[str, Any]:
             "interval_seconds": None,
             "org_count": 0,
             "failed_orgs": 0,
+            "notification_delivery_failures": 0,
             "health": "disabled",
             "reason": "scheduler_not_initialized",
         }
@@ -147,6 +150,9 @@ def public_scheduler_status(scheduler: Any) -> dict[str, Any]:
     result = {key: raw.get(key) for key in _PUBLIC_SCHEDULER_STATUS_KEYS}
     result["org_count"] = int(result.get("org_count") or 0)
     result["failed_orgs"] = int(result.get("failed_orgs") or 0)
+    result["notification_delivery_failures"] = int(
+        result.get("notification_delivery_failures") or 0
+    )
     if not result.get("enabled"):
         health = "disabled"
     elif not result.get("running"):
@@ -161,6 +167,7 @@ def public_scheduler_status(scheduler: Any) -> dict[str, Any]:
         result.get("leadership_state") != "leader"
         or not result.get("is_leader")
         or result["failed_orgs"] > 0
+        or result["notification_delivery_failures"] > 0
     ):
         health = "degraded"
     else:
@@ -459,6 +466,7 @@ class ObservabilityOperationsScheduler:
         leadership_lock: SchedulerLeadershipLock | None = None,
         execution_lock: SchedulerLeadershipLock | None = None,
         durable_fence: SchedulerDurableFence | None = None,
+        notification_outbox: NotificationOutboxService | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
@@ -483,6 +491,10 @@ class ObservabilityOperationsScheduler:
             session_factory,
             lease_seconds=settings.observability_scheduler_lease_seconds,
         )
+        self._notification_outbox = notification_outbox or NotificationOutboxService(
+            session_factory,
+            settings,
+        )
         self._task: asyncio.Task | None = None
         self._lease_heartbeat_task: asyncio.Task | None = None
         self._durable_fence_lost = asyncio.Event()
@@ -499,6 +511,7 @@ class ObservabilityOperationsScheduler:
             "last_success_at": None,
             "last_error": None,
             "last_tick_failures": [],
+            "notification_delivery_failures": 0,
             "org_runs": {},
         }
 
@@ -554,6 +567,9 @@ class ObservabilityOperationsScheduler:
             "interval_seconds": self._settings.observability_scheduler_interval_seconds,
             "org_count": len(self._settings.observability_scheduler_org_ids),
             "failed_orgs": len(self._state["last_tick_failures"]),
+            "notification_delivery_failures": self._state[
+                "notification_delivery_failures"
+            ],
         }
 
     def _set_leadership_state(self, state: str, *, error: str | None = None) -> None:
@@ -710,7 +726,7 @@ class ObservabilityOperationsScheduler:
                             self._settings.observability_scheduler_enable_notifications
                         ),
                         "notification_delivery_mode": (
-                            "fail_closed_durable_outbox_required"
+                            "durable_transactional_outbox"
                         ),
                     },
                 )
@@ -718,24 +734,79 @@ class ObservabilityOperationsScheduler:
             await session.refresh(row)
             return str(row.id)
 
-    async def _finish_run_row(
+    async def _complete_run_in_session(
+        self,
+        session: AsyncSession,
+        run_id: str,
+        *,
+        org_id: str,
+        detector_summary: dict[str, Any],
+        policy_summary: dict[str, Any],
+        notification_summary: dict[str, Any],
+    ) -> None:
+        row = (
+            await session.execute(
+                select(ObservabilityOperationRun)
+                .where(
+                    ObservabilityOperationRun.id == run_id,
+                    ObservabilityOperationRun.org_id == org_id,
+                )
+                .with_for_update()
+            )
+        ).scalar_one()
+        row.completed_at = utc_now_naive()
+        row.success = True
+        row.error_message = None
+        row.detector_summary = detector_summary
+        row.policy_summary = policy_summary
+        row.notification_summary = notification_summary
+        session.add(
+            SystemAuditEvent(
+                occurred_at=utc_now_naive(),
+                actor_subject="system:scheduler",
+                actor_roles=["system"],
+                org_id=org_id,
+                action="scheduler_run",
+                resource_type="observability_operation_run",
+                resource_id=str(row.id),
+                request_id=None,
+                success=True,
+                details={
+                    "run_type": row.run_type,
+                    "detector_summary": detector_summary,
+                    "policy_summary": policy_summary,
+                    "notification_summary": notification_summary,
+                    "success_semantics": "domain_commit_and_notification_enqueue",
+                },
+            )
+        )
+
+    async def _record_run_failure(
         self,
         run_id: str,
         *,
         org_id: str,
-        success: bool,
         detector_summary: dict[str, Any],
         policy_summary: dict[str, Any],
         notification_summary: dict[str, Any],
-        error_message: str | None = None,
+        error_message: str,
     ) -> None:
         async with self._session_factory() as session:
             async with self._fenced_transaction(session):
-                row = await session.get(ObservabilityOperationRun, run_id)
+                row = (
+                    await session.execute(
+                        select(ObservabilityOperationRun)
+                        .where(
+                            ObservabilityOperationRun.id == run_id,
+                            ObservabilityOperationRun.org_id == org_id,
+                        )
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
                 if row is None:
                     return
                 row.completed_at = utc_now_naive()
-                row.success = success
+                row.success = False
                 row.error_message = error_message
                 row.detector_summary = detector_summary
                 row.policy_summary = policy_summary
@@ -750,10 +821,10 @@ class ObservabilityOperationsScheduler:
                         resource_type="observability_operation_run",
                         resource_id=str(row.id),
                         request_id=None,
-                        success=success,
+                        success=False,
                         details={
                             "run_type": row.run_type,
-                            "error_message": error_message,
+                            "error_code": "scheduler_run_failed",
                             "detector_summary": detector_summary,
                             "policy_summary": policy_summary,
                             "notification_summary": notification_summary,
@@ -807,48 +878,55 @@ class ObservabilityOperationsScheduler:
                                 self._settings.observability_shutdown_approval_max_age_minutes
                             ),
                         )
-
-            notification_payload = {
-                "event_type": "observability_scheduler_run",
-                "org_id": org_id,
-                "run_started_at": run_started,
-                "detector_summary": detector_summary,
-                "policy_summary": policy_summary,
-            }
-            event_severity = runtime_event_severity(notification_payload)
-            min_severity = self._settings.observability_notification_min_severity
-            notification_result = skipped_notification_result(
-                min_severity=min_severity,
-                max_attempts=self._settings.observability_notification_max_attempts,
-                event_severity=event_severity,
-                reason=(
-                    "durable_outbox_required"
-                    if self._settings.observability_scheduler_enable_notifications
-                    else "scheduler_notifications_disabled"
-                ),
-            )
-            await self._finish_run_row(
-                run_id,
-                org_id=org_id,
-                success=True,
-                detector_summary=detector_summary,
-                policy_summary=policy_summary,
-                notification_summary=notification_result,
-            )
+                    notification_payload = {
+                        "event_type": "observability_scheduler_run",
+                        "org_id": org_id,
+                        "run_started_at": run_started,
+                        "detector_summary": detector_summary,
+                        "policy_summary": policy_summary,
+                    }
+                    event_severity = runtime_event_severity(notification_payload)
+                    min_severity = self._settings.observability_notification_min_severity
+                    if self._settings.observability_scheduler_enable_notifications:
+                        notification_result = (
+                            await self._notification_outbox.enqueue_scheduler_run(
+                                session,
+                                operation_run_id=run_id,
+                                org_id=org_id,
+                                run_started_at=run_started,
+                                detector_summary=detector_summary,
+                                policy_summary=policy_summary,
+                            )
+                        )
+                    else:
+                        notification_result = skipped_notification_result(
+                            min_severity=min_severity,
+                            max_attempts=self._settings.observability_notification_max_attempts,
+                            event_severity=event_severity,
+                            reason="scheduler_notifications_disabled",
+                        )
+                    await self._complete_run_in_session(
+                        session,
+                        run_id,
+                        org_id=org_id,
+                        detector_summary=detector_summary,
+                        policy_summary=policy_summary,
+                        notification_summary=notification_result,
+                    )
         except SchedulerFenceLost:
             # A stale leader must not write a completion/audit row with an old
             # fencing token. The durable start row remains incomplete evidence.
             raise
         except Exception as exc:
+            safe_error = f"scheduler_run_failed:{type(exc).__name__}"
             try:
-                await self._finish_run_row(
+                await self._record_run_failure(
                     run_id,
                     org_id=org_id,
-                    success=False,
                     detector_summary=detector_summary,
                     policy_summary=policy_summary,
                     notification_summary=notification_result,
-                    error_message=str(exc),
+                    error_message=safe_error,
                 )
             except SchedulerFenceLost:
                 raise SchedulerFenceLost(
@@ -871,6 +949,20 @@ class ObservabilityOperationsScheduler:
             "notification_result": notification_result,
         }
 
+    async def _drain_notification_outbox(self, org_id: str) -> DrainSummary:
+        return await self._notification_outbox.drain_ready(
+            org_id=org_id,
+            limit=self._settings.observability_notification_outbox_batch_size,
+        )
+
+    async def _maintain_notification_outbox(self, org_id: str) -> tuple[int, int]:
+        cleaned = await self._notification_outbox.cleanup_terminal_deliveries(
+            org_id=org_id,
+            limit=self._settings.observability_notification_outbox_batch_size,
+        )
+        failures = await self._notification_outbox.durable_failure_count(org_id=org_id)
+        return cleaned, failures
+
     async def _run_loop(self) -> None:
         try:
             while not self._stop.is_set():
@@ -886,6 +978,7 @@ class ObservabilityOperationsScheduler:
                 self._state["last_tick_at"] = utc_now_iso()
                 tick_failures: list[dict[str, str]] = []
                 successful_runs = 0
+                notification_delivery_failures = 0
                 leadership_lost = False
                 for org_id in self._settings.observability_scheduler_org_ids:
                     # Verify the dedicated lock connection between tenant runs. If it
@@ -899,7 +992,7 @@ class ObservabilityOperationsScheduler:
                         org_state = self._state["org_runs"].setdefault(org_id, {})
                         org_state["last_error"] = None
                     except Exception as exc:  # pragma: no cover - infrastructure dependent
-                        error_message = str(exc)
+                        error_message = f"scheduler_run_failed:{type(exc).__name__}"
                         tick_failures.append({"org_id": org_id, "error": error_message})
                         org_state = self._state["org_runs"].setdefault(org_id, {})
                         org_state["last_error"] = error_message
@@ -907,11 +1000,37 @@ class ObservabilityOperationsScheduler:
                         logger.exception(
                             "observability_scheduler_org_run_failed",
                             org_id=org_id,
-                            error=error_message,
+                            error_code=type(exc).__name__,
                         )
-                    # Re-verify both fences immediately after the complete database
-                    # and notification window. A replacement cannot enter while the
-                    # execution fence is held, so failover never overlaps side effects.
+                    # Re-verify before starting any non-transactional delivery work.
+                    if not await self._ensure_leadership():
+                        leadership_lost = True
+                        break
+                    try:
+                        org_state = self._state["org_runs"].setdefault(org_id, {})
+                        if self._settings.observability_scheduler_enable_notifications:
+                            drain = await self._drain_notification_outbox(org_id)
+                            org_state["last_notification_drain"] = drain.as_dict()
+                        cleaned, durable_failures = await self._maintain_notification_outbox(
+                            org_id
+                        )
+                        org_state["last_notification_cleanup_count"] = cleaned
+                        notification_delivery_failures += durable_failures
+                        org_state["last_delivery_error"] = (
+                            "notification_delivery_degraded"
+                            if durable_failures
+                            else None
+                        )
+                    except Exception as exc:  # pragma: no cover - infrastructure dependent
+                        notification_delivery_failures += 1
+                        org_state = self._state["org_runs"].setdefault(org_id, {})
+                        org_state["last_delivery_error"] = "notification_outbox_worker_failed"
+                        logger.exception(
+                            "notification_outbox_worker_failed",
+                            org_id=org_id,
+                            error_code=type(exc).__name__,
+                        )
+                    # Network work may outlive a heartbeat; re-verify before next org.
                     if not await self._ensure_leadership():
                         leadership_lost = True
                         break
@@ -926,6 +1045,9 @@ class ObservabilityOperationsScheduler:
                 else:
                     self._state["last_error"] = None
                 self._state["last_tick_failures"] = tick_failures
+                self._state["notification_delivery_failures"] = (
+                    notification_delivery_failures
+                )
 
                 wait_seconds = float(self._settings.observability_scheduler_interval_seconds)
                 if leadership_lost:

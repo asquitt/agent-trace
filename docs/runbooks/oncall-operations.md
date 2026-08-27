@@ -13,8 +13,9 @@ Last updated: August 27, 2026
 2. Confirm platform-monitoring and manual delivery routes to PagerDuty/Slack.
 3. Confirm latest deployment and migration state.
 4. Confirm latest backup/restore drill report is passing.
-5. Confirm scheduler notification summaries show zero attempts and
-   `durable_outbox_required` while automated delivery remains fail-closed.
+5. Confirm scheduler notification summaries and outbox health distinguish queued,
+   retry-scheduled, endpoint-accepted, dead-letter, blocked, and uncertain outcomes.
+   Investigate any `uncertain` result before replaying a non-idempotent destination.
 
 ## Alert Triage Priorities
 

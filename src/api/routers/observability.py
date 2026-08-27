@@ -490,6 +490,7 @@ def _request_id(request: Optional[Request]) -> Optional[str]:
 
 async def _dispatch_runtime_notifications(
     *,
+    storage: StorageDep,
     settings: SettingsDep,
     org_id: str,
     detector_summary: Optional[dict[str, Any]] = None,
@@ -516,10 +517,31 @@ async def _dispatch_runtime_notifications(
     if gate_result is not None:
         return gate_result
 
+    policy_targets: list[str] = []
+    breached_policy_ids: list[UUID] = []
+    for result in (policy_summary or {}).get("results", []):
+        if not isinstance(result, dict) or not result.get("breaches"):
+            continue
+        try:
+            breached_policy_ids.append(UUID(str(result["policy_id"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if breached_policy_ids:
+        async with storage.session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(BudgetPolicy.notification_targets).where(
+                        BudgetPolicy.org_id == org_id,
+                        BudgetPolicy.id.in_(breached_policy_ids),
+                    )
+                )
+            ).scalars()
+            for targets in rows:
+                policy_targets.extend(targets or [])
+
     raw_targets = merge_runtime_notification_targets(
         base_targets=settings.observability_notification_webhooks,
-        policy_summary=policy_summary,
-        extra_targets=extra_targets,
+        extra_targets=[*policy_targets, *(extra_targets or [])],
     )
     result = await send_runtime_notifications(
         raw_targets,
@@ -533,6 +555,9 @@ async def _dispatch_runtime_notifications(
         timeout_seconds=settings.observability_notification_timeout_seconds,
         max_attempts=settings.observability_notification_max_attempts,
         retry_backoff_seconds=settings.observability_notification_retry_backoff_seconds,
+        allowed_hosts=settings.observability_notification_allowed_hosts,
+        idempotent_webhooks=settings.observability_notification_idempotent_webhooks,
+        fingerprint_key=settings.observability_notification_fingerprint_key,
     )
     result["event_severity"] = event_severity
     result["min_severity"] = min_severity
@@ -1301,6 +1326,18 @@ def _session_response(session: AgentSession) -> SessionResponse:
 
 
 def _budget_policy_response(policy: BudgetPolicy) -> BudgetPolicyResponse:
+    redacted_targets: list[str] = []
+    for target in policy.notification_targets or []:
+        classified = classify_notification_targets([target])
+        redacted_targets.extend("webhook:configured" for _ in classified.webhooks)
+        redacted_targets.extend("slack:configured" for _ in classified.slack_webhooks)
+        redacted_targets.extend("pagerduty:configured" for _ in classified.pagerduty_routing_keys)
+        if not (
+            classified.webhooks
+            or classified.slack_webhooks
+            or classified.pagerduty_routing_keys
+        ):
+            redacted_targets.append("invalid:configured")
     return BudgetPolicyResponse(
         id=str(policy.id),
         org_id=policy.org_id,
@@ -1317,7 +1354,7 @@ def _budget_policy_response(policy: BudgetPolicy) -> BudgetPolicyResponse:
         action_on_breach=_enum_str(policy.action_on_breach),
         throttle_rate=policy.throttle_rate,
         cooldown_seconds=policy.cooldown_seconds,
-        notification_targets=policy.notification_targets or [],
+        notification_targets=redacted_targets,
         status=_enum_str(policy.status),
         metadata=policy.policy_metadata or {},
         created_by=policy.created_by,
@@ -2590,6 +2627,7 @@ async def evaluate_policies(
         await session.commit()
     if payload.notify:
         notification_result = await _dispatch_runtime_notifications(
+            storage=storage,
             settings=settings,
             org_id=payload.org_id,
             policy_summary=summary,
@@ -3249,6 +3287,7 @@ async def run_detectors(
     notification_result: Optional[dict[str, Any]] = None
     if payload.notify:
         notification_result = await _dispatch_runtime_notifications(
+            storage=storage,
             settings=settings,
             org_id=payload.org_id,
             detector_summary=detector_summary,
@@ -3348,6 +3387,7 @@ async def run_operations_cycle(
     notification_result: Optional[dict[str, Any]] = None
     if payload.notify:
         notification_result = await _dispatch_runtime_notifications(
+            storage=storage,
             settings=settings,
             org_id=payload.org_id,
             detector_summary=detector_summary,
@@ -3737,6 +3777,9 @@ async def export_siem_events(
             timeout_seconds=settings.observability_notification_timeout_seconds,
             max_attempts=settings.observability_notification_max_attempts,
             retry_backoff_seconds=settings.observability_notification_retry_backoff_seconds,
+            allowed_hosts=settings.observability_notification_allowed_hosts,
+            idempotent_webhooks=settings.observability_notification_idempotent_webhooks,
+            fingerprint_key=settings.observability_notification_fingerprint_key,
         )
 
     await _store_audit_event(

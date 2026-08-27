@@ -11,6 +11,7 @@ from sqlalchemy.dialects import postgresql
 from src.api.routers.observability import (
     _active_session_cutoff,
     _activity_future_cutoff,
+    _budget_policy_response,
     _default_group_update_match_statuses,
     _monotonic_activity_watermark,
     _parse_anomaly_group_fingerprint,
@@ -18,7 +19,42 @@ from src.api.routers.observability import (
     _stale_active_session_filters,
     _validate_activity_timestamp,
 )
-from src.models.observability import AgentSession, AnomalyStatus, AnomalyType
+from src.models.observability import (
+    AgentSession,
+    AnomalyStatus,
+    AnomalyType,
+    BudgetPeriodType,
+    BudgetPolicy,
+    BudgetScopeType,
+    PolicyActionType,
+    PolicyStatus,
+)
+
+
+def test_budget_policy_response_never_exposes_notification_credentials() -> None:
+    secret_target = "https://hooks.example.com/private-credential"
+    policy = BudgetPolicy(
+        id=uuid4(),
+        org_id="acme",
+        policy_name="budget",
+        scope_type=BudgetScopeType.ORG,
+        period_type=BudgetPeriodType.DAY,
+        action_on_breach=PolicyActionType.ALERT,
+        notification_targets=[secret_target, "pagerduty:routing-secret"],
+        status=PolicyStatus.ACTIVE,
+        policy_metadata={},
+        created_at=datetime(2026, 8, 27, 12, 0, 0),
+        updated_at=datetime(2026, 8, 27, 12, 0, 0),
+    )
+
+    response = _budget_policy_response(policy)
+
+    assert response.notification_targets == [
+        "webhook:configured",
+        "pagerduty:configured",
+    ]
+    assert secret_target not in repr(response)
+    assert "routing-secret" not in repr(response)
 
 
 def test_parse_anomaly_group_fingerprint_with_deployment_scope() -> None:

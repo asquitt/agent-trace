@@ -21,6 +21,8 @@ _DELIMITED_LIST_FIELDS = (
     "observability_notification_webhooks",
     "observability_notification_slack_webhooks",
     "observability_notification_pagerduty_routing_keys",
+    "observability_notification_allowed_hosts",
+    "observability_notification_idempotent_webhooks",
 )
 
 
@@ -263,10 +265,7 @@ class Settings(BaseSettings):
     )
     observability_scheduler_enable_notifications: bool = Field(
         default=False,
-        description=(
-            "Request scheduler notifications; delivery remains fail-closed until "
-            "a durable outbox is available"
-        ),
+        description="Enable durable scheduler notification enqueue and delivery",
     )
     observability_active_session_inactivity_minutes: int = Field(
         default=30,
@@ -288,9 +287,23 @@ class Settings(BaseSettings):
     observability_detector_anomaly_reopen_acknowledged: bool = Field(default=True)
 
     # Notification dispatch
-    observability_notification_webhooks: list[str] = Field(default_factory=list)
-    observability_notification_slack_webhooks: list[str] = Field(default_factory=list)
-    observability_notification_pagerduty_routing_keys: list[str] = Field(default_factory=list)
+    observability_notification_webhooks: list[SecretStr] = Field(default_factory=list)
+    observability_notification_slack_webhooks: list[SecretStr] = Field(default_factory=list)
+    observability_notification_pagerduty_routing_keys: list[SecretStr] = Field(default_factory=list)
+    observability_notification_allowed_hosts: list[str] = Field(
+        default_factory=list,
+        description="Exact HTTPS host allowlist for outbound notification webhooks",
+    )
+    observability_notification_idempotent_webhooks: list[SecretStr] = Field(
+        default_factory=list,
+        description=(
+            "Generic webhook URLs whose receivers honor the Idempotency-Key header"
+        ),
+    )
+    observability_notification_fingerprint_key: SecretStr = Field(
+        default=SecretStr(""),
+        description="Secret HMAC key used to fingerprint notification destinations",
+    )
     observability_notification_min_severity: Literal["info", "warning", "error", "critical"] = (
         Field(default="warning")
     )
@@ -298,6 +311,9 @@ class Settings(BaseSettings):
     observability_notification_timeout_seconds: float = Field(default=5.0, ge=0.1, le=30.0)
     observability_notification_max_attempts: int = Field(default=3, ge=1, le=10)
     observability_notification_retry_backoff_seconds: float = Field(default=0.5, ge=0.0, le=10.0)
+    observability_notification_outbox_batch_size: int = Field(default=25, ge=1, le=500)
+    observability_notification_claim_seconds: int = Field(default=30, ge=10, le=300)
+    observability_notification_retention_days: int = Field(default=30, ge=1, le=3650)
 
     # Runtime policy safety controls
     observability_shutdown_requires_approval: bool = Field(

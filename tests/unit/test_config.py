@@ -68,7 +68,10 @@ def test_list_settings_accept_scalar_comma_and_json_environment_values() -> None
         "https://admin.example.com",
     ]
     assert settings.observability_scheduler_org_ids == ["prod-org"]
-    assert settings.observability_notification_webhooks == [
+    assert [
+        value.get_secret_value()
+        for value in settings.observability_notification_webhooks
+    ] == [
         "https://hooks.example.com/primary",
         "https://hooks.example.com/fallback",
     ]

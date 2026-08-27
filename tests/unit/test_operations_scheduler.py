@@ -464,17 +464,115 @@ async def test_scheduler_continues_when_one_org_run_fails(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("notifications_requested", "expected_reason"),
-    [
-        (False, "scheduler_notifications_disabled"),
-        (True, "durable_outbox_required"),
-    ],
-)
-async def test_scheduler_notifications_fail_closed_without_outbox(
+async def test_scheduler_drains_backlog_after_current_run_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    drain_calls: list[str] = []
+
+    class FakeOutbox:
+        async def enqueue_scheduler_run(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("patched run_once owns this test")
+
+        async def drain_ready(self, *, org_id: str, limit: int) -> Any:
+            assert limit == 25
+            drain_calls.append(org_id)
+            scheduler._stop.set()  # noqa: SLF001 - test-specific loop boundary
+            from src.services.notification_outbox import DrainSummary
+
+            return DrainSummary()
+
+        async def cleanup_terminal_deliveries(self, *, org_id: str, limit: int) -> int:
+            assert org_id == "acme"
+            assert limit == 25
+            return 0
+
+        async def durable_failure_count(self, *, org_id: str) -> int:
+            assert org_id == "acme"
+            return 2
+
+    async def failing_run_once(
+        _self: ObservabilityOperationsScheduler,
+        _org_id: str,
+    ) -> dict[str, Any]:
+        raise RuntimeError("current producer failed")
+
+    monkeypatch.setattr(ObservabilityOperationsScheduler, "run_once", failing_run_once)
+    scheduler = ObservabilityOperationsScheduler(
+        _session_factory_stub(),
+        _settings(
+            observability_scheduler_enabled=True,
+            observability_scheduler_org_ids=["acme"],
+            observability_scheduler_enable_notifications=True,
+        ),
+        leadership_lock=_leadership_lock_stub(),
+        durable_fence=_durable_fence_stub(),
+        notification_outbox=cast(Any, FakeOutbox()),
+    )
+
+    await scheduler.start()
+    await asyncio.wait_for(scheduler._stop.wait(), timeout=1)  # noqa: SLF001
+    await scheduler.stop()
+
+    assert drain_calls == ["acme"]
+    assert scheduler.status()["failed_orgs"] == 1
+    assert scheduler.status()["notification_delivery_failures"] == 2
+
+
+@pytest.mark.asyncio
+async def test_active_leader_maintains_historical_outbox_when_delivery_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    maintenance_calls: list[tuple[str, int]] = []
+
+    class FakeOutbox:
+        async def enqueue_scheduler_run(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("notifications are disabled")
+
+        async def drain_ready(self, **_kwargs: Any) -> Any:
+            raise AssertionError("delivery is disabled")
+
+        async def cleanup_terminal_deliveries(self, *, org_id: str, limit: int) -> int:
+            maintenance_calls.append((org_id, limit))
+            return 1
+
+        async def durable_failure_count(self, *, org_id: str) -> int:
+            assert org_id == "acme"
+            return 1
+
+    async def run_once(
+        _self: ObservabilityOperationsScheduler,
+        org_id: str,
+    ) -> dict[str, Any]:
+        assert org_id == "acme"
+        scheduler._stop.set()  # noqa: SLF001
+        return {"org_id": org_id}
+
+    monkeypatch.setattr(ObservabilityOperationsScheduler, "run_once", run_once)
+    scheduler = ObservabilityOperationsScheduler(
+        _session_factory_stub(),
+        _settings(
+            observability_scheduler_enabled=True,
+            observability_scheduler_org_ids=["acme"],
+            observability_scheduler_enable_notifications=False,
+        ),
+        leadership_lock=_leadership_lock_stub(),
+        durable_fence=_durable_fence_stub(),
+        notification_outbox=cast(Any, FakeOutbox()),
+    )
+
+    await scheduler.start()
+    await asyncio.wait_for(scheduler._stop.wait(), timeout=1)  # noqa: SLF001
+    await scheduler.stop()
+
+    assert maintenance_calls == [("acme", 25)]
+    assert scheduler.status()["notification_delivery_failures"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("notifications_requested", [False, True])
+async def test_scheduler_stages_notification_result_without_network_io(
     monkeypatch: pytest.MonkeyPatch,
     notifications_requested: bool,
-    expected_reason: str,
 ) -> None:
     async def forbidden_dispatch(*_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("scheduler must not perform outbound notification I/O")
@@ -486,6 +584,21 @@ async def test_scheduler_notifications_fail_closed_without_outbox(
     session_factory = FakeRunSessionFactory()
     durable_fence = FakeDurableFence()
     assert await durable_fence.acquire() is True
+    class FakeOutbox:
+        enqueue_calls = 0
+
+        async def enqueue_scheduler_run(self, _session: Any, **_kwargs: Any) -> dict[str, Any]:
+            self.enqueue_calls += 1
+            return {
+                "queued": 1,
+                "accepted": 0,
+                "delivery_semantics": "endpoint_acceptance",
+            }
+
+        async def drain_ready(self, **_kwargs: Any) -> Any:
+            raise AssertionError("run_once must not drain the outbox")
+
+    outbox = FakeOutbox()
     scheduler = ObservabilityOperationsScheduler(
         cast(async_sessionmaker, session_factory),
         _settings(
@@ -495,6 +608,7 @@ async def test_scheduler_notifications_fail_closed_without_outbox(
         ),
         leadership_lock=_leadership_lock_stub(),
         durable_fence=durable_fence,
+        notification_outbox=cast(Any, outbox),
     )
     finished: dict[str, Any] = {}
 
@@ -502,20 +616,27 @@ async def test_scheduler_notifications_fail_closed_without_outbox(
         assert org_id == "acme"
         return "run-1"
 
-    async def fake_finish_run_row(run_id: str, **kwargs: Any) -> None:
+    async def fake_complete_run(_session: Any, run_id: str, **kwargs: Any) -> None:
         finished.update({"run_id": run_id, **kwargs})
 
     monkeypatch.setattr(scheduler, "_start_run_row", fake_start_run_row)
-    monkeypatch.setattr(scheduler, "_finish_run_row", fake_finish_run_row)
+    monkeypatch.setattr(scheduler, "_complete_run_in_session", fake_complete_run)
 
     result = await scheduler.run_once("acme")
 
     notification_result = result["notification_result"]
-    assert notification_result["attempted"] == 0
-    assert notification_result["succeeded"] == 0
-    assert notification_result["failed"] == 0
-    assert notification_result["skipped"] is True
-    assert notification_result["skip_reason"] == expected_reason
+    if notifications_requested:
+        assert notification_result == {
+            "queued": 1,
+            "accepted": 0,
+            "delivery_semantics": "endpoint_acceptance",
+        }
+        assert outbox.enqueue_calls == 1
+    else:
+        assert notification_result["attempted"] == 0
+        assert notification_result["skipped"] is True
+        assert notification_result["skip_reason"] == "scheduler_notifications_disabled"
+        assert outbox.enqueue_calls == 0
     assert finished["notification_summary"] == notification_result
     assert scheduler._state["org_runs"]["acme"]["last_notification_result"] == (  # noqa: SLF001
         notification_result
