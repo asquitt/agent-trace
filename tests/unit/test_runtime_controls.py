@@ -5,7 +5,9 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
+from src.api.routers.observability import BudgetPolicyCreateRequest
 from src.api.routers.runtime_controls import _require_runtime_auth
 from src.security import AuthContext
 from src.services.runtime_controls import (
@@ -63,6 +65,16 @@ def test_acknowledgement_hash_is_canonical() -> None:
         ),
         (
             AuthContext(
+                subject="local-development",
+                roles=frozenset({"operator", "admin"}),
+                org_ids=frozenset({"*"}),
+                auth_enabled=False,
+                authentication_method="local",
+            ),
+            403,
+        ),
+        (
+            AuthContext(
                 subject="viewer",
                 roles=frozenset({"viewer"}),
                 org_ids=frozenset({"acme"}),
@@ -100,3 +112,21 @@ def test_runtime_control_api_accepts_org_operator_api_key() -> None:
         requested_org_id="acme",
     )
     _require_runtime_auth(auth, "acme")
+
+
+def test_throttle_policy_requires_positive_rate() -> None:
+    payload = {
+        "org_id": "acme",
+        "policy_name": "throttle",
+        "scope_type": "org",
+        "period_type": "day",
+        "max_actions": 10,
+        "action_on_breach": "throttle",
+    }
+    with pytest.raises(ValidationError, match="throttle_rate is required"):
+        BudgetPolicyCreateRequest.model_validate(payload)
+    with pytest.raises(ValidationError):
+        BudgetPolicyCreateRequest.model_validate({**payload, "throttle_rate": 0})
+
+    valid = BudgetPolicyCreateRequest.model_validate({**payload, "throttle_rate": 25})
+    assert valid.throttle_rate == 25

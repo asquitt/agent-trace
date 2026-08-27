@@ -156,6 +156,37 @@ async def _validate_runtime_scope(
     return session_row
 
 
+async def _project_terminal_failure(
+    db: AsyncSession,
+    *,
+    control: RuntimeControlRequest,
+    failed_at: datetime,
+) -> None:
+    """Reconcile the matching session projection after an internal terminal failure."""
+    session_query = (
+        select(AgentSession)
+        .where(
+            AgentSession.id == control.session_id,
+            AgentSession.deployment_id == control.deployment_id,
+        )
+        .with_for_update()
+    )
+    session_row = (await db.execute(session_query)).scalar_one_or_none()
+    if session_row is None:
+        return
+    metadata = dict(session_row.session_metadata or {})
+    projection = dict(metadata.get("control", {}))
+    if projection.get("request_id") != str(control.id):
+        return
+    projection["state"] = RuntimeControlStatus.FAILED.value
+    projection["delivery_status"] = RuntimeControlStatus.FAILED.value
+    projection["execution_confirmed"] = False
+    projection["failure_reason"] = control.failure_reason
+    projection["acknowledged_at"] = failed_at.isoformat()
+    metadata["control"] = projection
+    session_row.session_metadata = metadata
+
+
 async def claim_runtime_controls(
     db: AsyncSession,
     *,
@@ -206,6 +237,7 @@ async def claim_runtime_controls(
         control.acknowledged_at = claimed_at
         control.lease_token_hash = None
         control.lease_expires_at = None
+        await _project_terminal_failure(db, control=control, failed_at=claimed_at)
         db.add(
             _audit_event(
                 actor_subject=actor_subject,
@@ -218,6 +250,8 @@ async def claim_runtime_controls(
                 occurred_at=claimed_at,
             )
         )
+    if exhausted:
+        await db.flush()
 
     shutdown_query = (
         select(RuntimeControlRequest, PolicyActionApproval)
@@ -252,6 +286,7 @@ async def claim_runtime_controls(
         control.acknowledged_at = claimed_at
         control.lease_token_hash = None
         control.lease_expires_at = None
+        await _project_terminal_failure(db, control=control, failed_at=claimed_at)
         db.add(
             _audit_event(
                 actor_subject=actor_subject,
@@ -263,6 +298,8 @@ async def claim_runtime_controls(
                 occurred_at=claimed_at,
             )
         )
+    if shutdown_rows:
+        await db.flush()
 
     valid_shutdown_approval = and_(
         RuntimeControlRequest.approval_id.is_not(None),
@@ -429,7 +466,10 @@ async def acknowledge_runtime_control(
     if outcome == "applied" and control.action_type == "shutdown":
         session_row.status = SessionStatus.TERMINATED
         session_row.ended_at = acknowledged_at
-        session_row.last_activity_at = acknowledged_at
+        session_row.duration_ms = max(
+            int((acknowledged_at - session_row.started_at).total_seconds() * 1000),
+            0,
+        )
 
     db.add(
         _audit_event(

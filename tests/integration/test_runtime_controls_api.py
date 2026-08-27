@@ -52,10 +52,15 @@ def runtime_client() -> tuple[TestClient, Settings]:
     previous_override = app.dependency_overrides.get(get_settings)
     app.dependency_overrides[get_settings] = lambda: settings
     try:
-        with TestClient(app, base_url="https://testserver") as client:
+        client = TestClient(app, base_url="https://testserver")
+        try:
+            client.__enter__()
+        except Exception as exc:  # pragma: no cover - infrastructure dependent
+            pytest.skip(f"Runtime-control integration test skipped (infra unavailable): {exc}")
+        try:
             yield client, settings
-    except Exception as exc:  # pragma: no cover - infrastructure dependent
-        pytest.skip(f"Runtime-control integration test skipped (infra unavailable): {exc}")
+        finally:
+            client.__exit__(None, None, None)
     finally:
         if previous_override is None:
             app.dependency_overrides.pop(get_settings, None)
@@ -539,14 +544,31 @@ def test_runtime_control_tenant_lease_ack_and_shutdown_projection(
             assert shutdown_session is not None
             assert shutdown_session.status == SessionStatus.TERMINATED
             assert shutdown_session.ended_at is not None
+            assert shutdown_session.duration_ms is not None
+            assert shutdown_session.duration_ms >= 0
+            assert shutdown_session.last_activity_at is None
             reclaim_control = await db.get(RuntimeControlRequest, reclaim_id)
             assert reclaim_control is not None
             assert reclaim_control.status == "failed"
             assert reclaim_control.failure_reason == "delivery_attempts_exhausted"
+            reclaim_session = await db.get(AgentSession, reclaim_session_id)
+            assert reclaim_session is not None
+            assert reclaim_session.session_metadata["control"]["state"] == "failed"
+            assert (
+                reclaim_session.session_metadata["control"]["failure_reason"]
+                == "delivery_attempts_exhausted"
+            )
             expired_control = await db.get(RuntimeControlRequest, expired_id)
             assert expired_control is not None
             assert expired_control.status == "failed"
             assert expired_control.failure_reason == "authorization_invalid_or_expired"
+            expired_session = await db.get(AgentSession, expired_session_id)
+            assert expired_session is not None
+            assert expired_session.session_metadata["control"]["state"] == "failed"
+            assert (
+                expired_session.session_metadata["control"]["failure_reason"]
+                == "authorization_invalid_or_expired"
+            )
             await db.execute(delete(BrowserSession).where(BrowserSession.subject == "runtime-acme"))
             await db.execute(delete(AgentDeployment).where(AgentDeployment.id == deployment_id))
             await db.commit()

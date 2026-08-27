@@ -71,6 +71,36 @@ def test_severity_rank_orders_levels() -> None:
 
 
 @pytest.mark.asyncio
+async def test_throttle_without_rate_fails_closed_before_delivery() -> None:
+    policy = BudgetPolicy(
+        id=uuid4(),
+        org_id="acme",
+        policy_name="invalid throttle",
+        scope_type=BudgetScopeType.ORG,
+        period_type=BudgetPeriodType.DAY,
+        action_on_breach=PolicyActionType.THROTTLE,
+        status=PolicyStatus.ACTIVE,
+        notification_targets=[],
+        policy_metadata={},
+    )
+
+    result = await _apply_policy_action(
+        cast(AsyncSession, object()),
+        policy,
+        "acme",
+        datetime(2026, 8, 27),
+        [{"trigger_type": "max_actions", "observed_value": 2.0}],
+        execute_actions=True,
+        require_shutdown_approval=True,
+        approval_max_age_minutes=60,
+    )
+
+    assert result["status"] == "invalid_configuration"
+    assert result["delivery_status"] == "blocked"
+    assert result["control_request_ids"] == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("action", "expected_name"),
     [
@@ -99,6 +129,7 @@ async def test_policy_controls_are_persisted_as_unconfirmed_requests(
         scope_type=BudgetScopeType.ORG,
         period_type=BudgetPeriodType.DAY,
         action_on_breach=action,
+        throttle_rate=10 if action == PolicyActionType.THROTTLE else None,
         status=PolicyStatus.ACTIVE,
         notification_targets=[],
         policy_metadata={},

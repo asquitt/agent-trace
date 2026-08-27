@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import case, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -841,10 +841,16 @@ class BudgetPolicyCreateRequest(BaseModel):
     max_actions: Optional[int] = None
     max_session_minutes: Optional[int] = None
     action_on_breach: PolicyActionType
-    throttle_rate: Optional[int] = None
+    throttle_rate: Optional[int] = Field(default=None, ge=1)
     cooldown_seconds: Optional[int] = None
     notification_targets: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_throttle_command(self) -> "BudgetPolicyCreateRequest":
+        if self.action_on_breach == PolicyActionType.THROTTLE and self.throttle_rate is None:
+            raise ValueError("throttle_rate is required for throttle policies")
+        return self
 
 
 class BudgetPolicyResponse(BaseModel):

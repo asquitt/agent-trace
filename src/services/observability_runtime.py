@@ -213,11 +213,17 @@ async def _apply_policy_action(
         result["status"] = "dry_run"
         return result
 
+    policy_action = _enum_value(policy.action_on_breach)
+    if (
+        policy_action == PolicyActionType.THROTTLE.value
+        and (policy.throttle_rate is None or policy.throttle_rate <= 0)
+    ):
+        result["status"] = "invalid_configuration"
+        result["delivery_status"] = "blocked"
+        return result
     sessions = await _find_target_sessions(db, policy, org_id)
     affected_ids: list[str] = []
     skipped_ids: list[str] = []
-
-    policy_action = _enum_value(policy.action_on_breach)
     shutdown_approval: PolicyActionApproval | None = None
     if policy_action == PolicyActionType.SHUTDOWN.value and require_shutdown_approval:
         approval_cutoff = now - timedelta(minutes=max(approval_max_age_minutes, 1))

@@ -29,7 +29,7 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime-governance
 - Current validation snapshot:
   - `ruff check --select F src tests` passed
   - `pyright` passed (`0 errors`)
-  - `pytest -q` passed (`136 passed`) against PostgreSQL, including browser-session
+  - `pytest -q` passed (`146 passed`) against PostgreSQL, including browser-session
     persistence, tenant-scoped operator APIs, durable scheduler fencing, and fail-closed
     notification persistence
   - operator console `npm test`, TypeScript validation, production build, and npm audit
@@ -42,8 +42,9 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime-governance
 - Release blockers:
   - the authenticated operator console is implemented and locally runtime-verified, but
     no hosted deployment or public-environment identity has been verified
-  - runtime `shutdown`/`throttle` delivery and agent acknowledgement are not implemented;
-    current controls are persisted requests and audit records only
+  - provider-neutral runtime `shutdown`/`throttle` delivery and acknowledgement are
+    implemented and locally exact-image verified, but no customer runtime integration or
+    hosted environment has been verified
   - automated scheduler outbound notifications are intentionally fail-closed until a
     durable, idempotent outbox/claim path exists; scheduled runs persist a zero-attempt
     notification summary with `skip_reason=durable_outbox_required`
@@ -67,8 +68,8 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime-governance
 | Fleet observability across deployments | API beta; authenticated operator console alpha | `GET /api/v1/observability/dashboard/fleet`, `/console/` |
 | Session lifecycle management | Shipped | `POST /api/v1/observability/sessions`, `PATCH /api/v1/observability/sessions/{session_id}`, `GET /api/v1/observability/sessions/active` |
 | Anomaly detection and triage | Shipped | `POST /api/v1/observability/detectors/run`, `GET /api/v1/observability/anomalies`, `GET /api/v1/observability/anomalies/groups` |
-| Budget policy evaluation and control requests | Backend beta; no runtime delivery | `POST /api/v1/observability/budget-policies`, `POST /api/v1/observability/policies/evaluate`, `GET /api/v1/observability/budget-policies/events` |
-| Approval workflow for shutdown requests | Backend beta; no runtime acknowledgement | `POST /api/v1/observability/policy-approvals`, `POST /api/v1/observability/policy-approvals/{approval_id}/decision` |
+| Budget policy evaluation and control requests | Backend beta; provider-neutral runtime delivery | `POST /api/v1/observability/budget-policies`, `POST /api/v1/runtime-controls/claim`, `POST /api/v1/runtime-controls/{control_id}/ack` |
+| Approval workflow for shutdown requests | Backend beta; runtime acknowledgement implemented | `POST /api/v1/observability/policy-approvals`, `POST /api/v1/observability/policy-approvals/{approval_id}/decision` |
 | Multi-agent delegation tracing | Shipped | `POST /api/v1/observability/delegations`, `GET /api/v1/observability/chains/{trace_id}` |
 | Memory consistency monitoring | Shipped | `POST /api/v1/observability/memory/snapshots/batch`, `GET /api/v1/observability/memory/consistency` |
 | Cost analytics and risk insights | Shipped | `GET /api/v1/observability/costs/summary`, `GET /api/v1/observability/insights/risk` |
@@ -85,7 +86,8 @@ src/
 │       ├── auth.py              # API-key-to-browser-session exchange
 │       ├── console.py           # Same-origin production console assets
 │       ├── traces.py            # Trace APIs
-│       └── observability.py     # Fleet/session/runtime/policy APIs
+│       ├── observability.py     # Fleet/session/runtime/policy APIs
+│       └── runtime_controls.py  # Runtime command claim/ack APIs
 ├── cli/
 │   ├── trace_viewer.py
 │   └── production_preflight.py
@@ -93,6 +95,7 @@ src/
 ├── services/
 │   ├── observability_runtime.py # Detectors + policy evaluation/actions
 │   ├── operations_scheduler.py  # Background runtime control loop
+│   ├── runtime_controls.py      # Durable runtime command delivery
 │   ├── notifications.py         # Webhook/Slack/PagerDuty dispatch
 │   └── production_preflight.py  # Deployment readiness checks
 ├── tracing/                     # Tracer/context/provider wrappers + storage

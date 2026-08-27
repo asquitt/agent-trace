@@ -45,7 +45,7 @@ class RuntimeControlAckResponse(BaseModel):
 
 
 def _require_runtime_auth(auth: AuthContext, org_id: str) -> None:
-    if auth.authentication_method == "browser_session":
+    if auth.authentication_method != "api_key":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Runtime control delivery requires API-key authentication",
