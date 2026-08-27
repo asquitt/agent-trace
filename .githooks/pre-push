@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Homebrew Git may run under Rosetta on Apple Silicon. Re-enter native arm64 before
+# launching the project toolchain so compiled Python dependencies match the venv.
+if [[ "${LOCAL_CI_NATIVE_REEXEC:-0}" != "1" ]] \
+  && [[ "$(uname -s)" == "Darwin" ]] \
+  && [[ -x /usr/sbin/sysctl ]] \
+  && [[ "$(/usr/sbin/sysctl -in sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
+  export LOCAL_CI_NATIVE_REEXEC=1
+  exec /usr/bin/arch -arm64 /bin/bash "$0" "$@"
+fi
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+cd "$ROOT_DIR"
+
+ZERO_SHA="0000000000000000000000000000000000000000"
+PUSHED_REFS=0
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [[ -z "${local_ref:-}" ]]; then
+    continue
+  fi
+  if [[ "$local_sha" == "$ZERO_SHA" ]]; then
+    echo "[pre-push] deletion does not require local CI: $remote_ref"
+    continue
+  fi
+  if [[ ! "$local_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "[pre-push] invalid local SHA for $local_ref: $local_sha" >&2
+    exit 1
+  fi
+
+  PUSHED_REFS=$((PUSHED_REFS + 1))
+  echo "[pre-push] validating $local_ref ($local_sha) -> $remote_ref"
+  bash scripts/local_ci.sh --push "$local_sha"
+done
+
+if [[ "$PUSHED_REFS" -eq 0 ]]; then
+  echo "[pre-push] no non-delete refs to validate"
+fi

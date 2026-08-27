@@ -1,0 +1,16 @@
+# Local CI enforcement. GitHub-hosted pull-request CI is intentionally disabled.
+#
+# Install both hooks with: ./scripts/install_git_hooks.sh
+# Run manually with: ./.venv/bin/pre-commit run --all-files
+default_install_hook_types: [pre-commit]
+
+repos:
+  - repo: local
+    hooks:
+      - id: local-commit-ci
+        name: Local commit CI
+        entry: bash scripts/local_ci.sh --commit
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
