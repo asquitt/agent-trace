@@ -518,7 +518,7 @@ async def evaluate_budget_policies(
             "policy_id": str(policy.id),
             "policy_name": policy.policy_name,
             "scope_type": _enum_value(policy.scope_type),
-            "notification_targets": list(policy.notification_targets or []),
+            "notification_target_count": len(policy.notification_targets or []),
             "window_start": window_start.isoformat(),
             "window_end": now.isoformat(),
             "breaches": breaches,

@@ -114,6 +114,33 @@ class RuntimeControlStatus(str, Enum):
     FAILED = "failed"
 
 
+class NotificationDeliveryStatus(str, Enum):
+    """Durable notification delivery lifecycle state."""
+
+    PENDING = "pending"
+    PROCESSING = "processing"
+    RETRY_SCHEDULED = "retry_scheduled"
+    ACCEPTED = "accepted"
+    DEAD_LETTER = "dead_letter"
+    BLOCKED = "blocked"
+    UNCERTAIN = "uncertain"
+    CANCELLED = "cancelled"
+
+
+class NotificationDeliveryAttemptOutcome(str, Enum):
+    """Outcome recorded for one notification delivery attempt."""
+
+    IN_PROGRESS = "in_progress"
+    ACCEPTED = "accepted"
+    RETRY_SCHEDULED = "retry_scheduled"
+    DEAD_LETTER = "dead_letter"
+    BLOCKED = "blocked"
+    UNCERTAIN = "uncertain"
+    ABANDONED_RETRYABLE = "abandoned_retryable"
+    WORKER_LOST_UNCERTAIN = "worker_lost_uncertain"
+    CANCELLED = "cancelled"
+
+
 class AnomalyType(str, Enum):
     """Supported anomaly classes."""
 
@@ -794,9 +821,204 @@ class ObservabilityOperationRun(Base):
     notification_summary: Mapped[Optional[dict]] = mapped_column(JSONB)
     run_metadata: Mapped[Optional[dict]] = mapped_column("metadata", JSONB, default=dict)
 
+    notification_deliveries: Mapped[list["NotificationDelivery"]] = relationship(
+        "NotificationDelivery",
+        back_populates="operation_run",
+        cascade="all, delete-orphan",
+    )
+
     __table_args__ = (
         Index("ix_observability_operation_runs_org_started", "org_id", "started_at"),
         Index("ix_observability_operation_runs_run_type_started", "run_type", "started_at"),
+    )
+
+
+class NotificationDelivery(Base):
+    """Secret-free durable notification queued by an observability run."""
+
+    __tablename__ = "notification_deliveries"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    org_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    operation_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("observability_operation_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    payload_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    channel: Mapped[str] = mapped_column(String(20), nullable=False)
+    target_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_source_refs: Mapped[list[dict]] = mapped_column(JSONB, nullable=False, default=list)
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_supported: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=NotificationDeliveryStatus.PENDING.value,
+        index=True,
+    )
+    claim_owner: Mapped[Optional[str]] = mapped_column(String(255))
+    claim_expires_at: Mapped[Optional[datetime]] = mapped_column(index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    next_attempt_at: Mapped[Optional[datetime]] = mapped_column(index=True)
+    accepted_at: Mapped[Optional[datetime]] = mapped_column()
+    terminal_at: Mapped[Optional[datetime]] = mapped_column(index=True)
+    last_http_status: Mapped[Optional[int]] = mapped_column(Integer)
+    last_error_code: Mapped[Optional[str]] = mapped_column(String(100))
+    provider_request_id: Mapped[Optional[str]] = mapped_column(String(255))
+
+    operation_run: Mapped["ObservabilityOperationRun"] = relationship(
+        "ObservabilityOperationRun",
+        back_populates="notification_deliveries",
+    )
+    attempts: Mapped[list["NotificationDeliveryAttempt"]] = relationship(
+        "NotificationDeliveryAttempt",
+        back_populates="delivery",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "channel IN ('webhook', 'slack', 'pagerduty')",
+            name="ck_notification_deliveries_channel",
+        ),
+        sa.CheckConstraint(
+            "status IN ('pending', 'processing', 'retry_scheduled', 'accepted', "
+            "'dead_letter', 'blocked', 'uncertain', 'cancelled')",
+            name="ck_notification_deliveries_status",
+        ),
+        sa.CheckConstraint(
+            "jsonb_typeof(payload) = 'object'",
+            name="ck_notification_deliveries_payload_object",
+        ),
+        sa.CheckConstraint(
+            "jsonb_typeof(target_source_refs) = 'array'",
+            name="ck_notification_deliveries_source_refs_array",
+        ),
+        sa.CheckConstraint(
+            "payload_version >= 1",
+            name="ck_notification_deliveries_payload_version",
+        ),
+        sa.CheckConstraint(
+            "attempt_count >= 0 AND max_attempts >= 1 AND attempt_count <= max_attempts",
+            name="ck_notification_deliveries_attempt_bounds",
+        ),
+        sa.CheckConstraint(
+            "(status = 'processing' AND claim_owner IS NOT NULL "
+            "AND claim_expires_at IS NOT NULL) OR "
+            "(status != 'processing' AND claim_owner IS NULL "
+            "AND claim_expires_at IS NULL)",
+            name="ck_notification_deliveries_claim_fields",
+        ),
+        sa.CheckConstraint(
+            "status NOT IN ('pending', 'retry_scheduled') OR next_attempt_at IS NOT NULL",
+            name="ck_notification_deliveries_next_attempt",
+        ),
+        sa.CheckConstraint(
+            "(status IN ('accepted', 'dead_letter', 'blocked', 'uncertain', 'cancelled') "
+            "AND terminal_at IS NOT NULL) OR "
+            "(status NOT IN ('accepted', 'dead_letter', 'blocked', 'uncertain', 'cancelled') "
+            "AND terminal_at IS NULL)",
+            name="ck_notification_deliveries_terminal_time",
+        ),
+        sa.CheckConstraint(
+            "(status = 'accepted' AND accepted_at IS NOT NULL) OR "
+            "(status != 'accepted' AND accepted_at IS NULL)",
+            name="ck_notification_deliveries_accepted_time",
+        ),
+        sa.CheckConstraint(
+            "last_http_status IS NULL OR "
+            "(last_http_status >= 100 AND last_http_status <= 599)",
+            name="ck_notification_deliveries_http_status",
+        ),
+        UniqueConstraint(
+            "operation_run_id",
+            "channel",
+            "target_fingerprint",
+            name="uq_notification_deliveries_run_target",
+        ),
+        Index(
+            "uq_notification_deliveries_idempotency_key",
+            "idempotency_key",
+            unique=True,
+        ),
+        Index(
+            "ix_notification_deliveries_claim_scope",
+            "org_id",
+            "status",
+            "next_attempt_at",
+        ),
+        Index(
+            "ix_notification_deliveries_claim_expiry",
+            "status",
+            "claim_expires_at",
+        ),
+    )
+
+
+class NotificationDeliveryAttempt(Base):
+    """Secret-free record of one outbound notification attempt."""
+
+    __tablename__ = "notification_delivery_attempts"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    org_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    delivery_id: Mapped[UUID] = mapped_column(
+        ForeignKey("notification_deliveries.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    worker_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(nullable=False, index=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column()
+    outcome: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=NotificationDeliveryAttemptOutcome.IN_PROGRESS.value,
+    )
+    http_status: Mapped[Optional[int]] = mapped_column(Integer)
+    error_code: Mapped[Optional[str]] = mapped_column(String(100))
+    provider_request_id: Mapped[Optional[str]] = mapped_column(String(255))
+
+    delivery: Mapped["NotificationDelivery"] = relationship(
+        "NotificationDelivery",
+        back_populates="attempts",
+    )
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "attempt_number >= 1",
+            name="ck_notification_delivery_attempts_number",
+        ),
+        sa.CheckConstraint(
+            "outcome IN ('in_progress', 'accepted', 'retry_scheduled', 'dead_letter', "
+            "'blocked', 'uncertain', 'abandoned_retryable', "
+            "'worker_lost_uncertain', 'cancelled')",
+            name="ck_notification_delivery_attempts_outcome",
+        ),
+        sa.CheckConstraint(
+            "(outcome = 'in_progress' AND completed_at IS NULL) OR "
+            "(outcome != 'in_progress' AND completed_at IS NOT NULL)",
+            name="ck_notification_delivery_attempts_completion",
+        ),
+        sa.CheckConstraint(
+            "http_status IS NULL OR (http_status >= 100 AND http_status <= 599)",
+            name="ck_notification_delivery_attempts_http_status",
+        ),
+        UniqueConstraint(
+            "delivery_id",
+            "attempt_number",
+            name="uq_notification_delivery_attempts_sequence",
+        ),
+        Index(
+            "ix_notification_delivery_attempts_org_started",
+            "org_id",
+            "started_at",
+        ),
     )
 
 

@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Callable
 
 from ..config import Settings
+from .notifications import (
+    notification_secret_values,
+    validate_notification_https_target,
+)
 
 
 @dataclass(frozen=True)
@@ -19,6 +23,54 @@ def _bool_check(predicate: Callable[[], bool], message: str, *, status_on_fail: 
     if predicate():
         return CheckResult("pass", message)
     return CheckResult(status_on_fail, message)
+
+
+def _scheduler_notification_configuration_valid(settings: Settings) -> bool:
+    if not settings.observability_scheduler_enable_notifications:
+        return True
+    if not settings.observability_scheduler_enabled:
+        return False
+    if len(
+        settings.observability_notification_fingerprint_key.get_secret_value().encode("utf-8")
+    ) < 32:
+        return False
+    targets = notification_secret_values(settings.observability_notification_webhooks)
+    slack_targets = notification_secret_values(
+        settings.observability_notification_slack_webhooks
+    )
+    pagerduty_keys = notification_secret_values(
+        settings.observability_notification_pagerduty_routing_keys
+    )
+    if not targets and not slack_targets and not pagerduty_keys:
+        return False
+    if settings.observability_notification_claim_seconds <= (
+        settings.observability_notification_timeout_seconds
+    ):
+        return False
+    try:
+        for target in targets:
+            validate_notification_https_target(
+                target,
+                settings.observability_notification_allowed_hosts,
+            )
+        for target in slack_targets:
+            validated = validate_notification_https_target(
+                target,
+                settings.observability_notification_allowed_hosts,
+            )
+            from urllib.parse import urlsplit
+
+            parsed = urlsplit(validated)
+            if parsed.hostname != "hooks.slack.com" or not parsed.path.startswith("/services/"):
+                return False
+        for target in notification_secret_values(
+            settings.observability_notification_idempotent_webhooks
+        ):
+            if target not in targets:
+                return False
+    except ValueError:
+        return False
+    return all(key.strip() for key in pagerduty_keys)
 
 
 def run_preflight(settings: Settings) -> list[CheckResult]:
@@ -65,10 +117,11 @@ def run_preflight(settings: Settings) -> list[CheckResult]:
             "Scheduler requires explicit org scope when enabled (`OBSERVABILITY_SCHEDULER_ORG_IDS`).",
         ),
         _bool_check(
-            lambda: not settings.observability_scheduler_enable_notifications,
+            lambda: _scheduler_notification_configuration_valid(settings),
             (
-                "Scheduler notifications must remain disabled until durable outbox delivery "
-                "is implemented (`OBSERVABILITY_SCHEDULER_ENABLE_NOTIFICATIONS=false`)."
+                "Scheduler notifications require the durable outbox, an enabled scheduler, "
+                "a 32-byte fingerprint key, safe channels, exact HTTPS host allowlisting, "
+                "and a claim window longer than the request timeout."
             ),
         ),
         _bool_check(

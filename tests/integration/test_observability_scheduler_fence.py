@@ -16,12 +16,13 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool
 
 from src.config import Settings
-from src.models import ObservabilityOperationRun, SystemAuditEvent
+from src.models import NotificationDelivery, ObservabilityOperationRun, SystemAuditEvent
 from src.services.operations_scheduler import (
     ObservabilityOperationsScheduler,
     PostgresSchedulerDurableFence,
     SchedulerFenceLost,
 )
+from src.utils.time import utc_now_naive
 
 
 @pytest.mark.asyncio
@@ -144,8 +145,8 @@ async def test_scheduler_fence_rejects_stale_writer_after_takeover() -> None:
 
 
 @pytest.mark.asyncio
-async def test_scheduler_persists_fail_closed_notification_summary() -> None:
-    """Scheduled outbound delivery stays zero-attempt even when requested."""
+async def test_scheduler_atomically_persists_notification_outbox() -> None:
+    """Scheduler success commits its completion, audit, and secret-free outbox together."""
     engine, session_factory = _isolated_database()
     org_id = f"scheduler-outbox-{uuid4()}"
     lease_name = f"test-scheduler-{uuid4()}"
@@ -161,6 +162,11 @@ async def test_scheduler_persists_fail_closed_notification_summary() -> None:
             observability_scheduler_run_detectors=False,
             observability_scheduler_run_policies=False,
             observability_scheduler_enable_notifications=True,
+            observability_notification_only_on_actionable=False,
+            observability_notification_min_severity="info",
+            observability_notification_webhooks=["https://hooks.example.com/runtime-secret"],
+            observability_notification_allowed_hosts=["hooks.example.com"],
+            observability_notification_fingerprint_key="f" * 32,
         ),
         durable_fence=durable_fence,
     )
@@ -168,9 +174,9 @@ async def test_scheduler_persists_fail_closed_notification_summary() -> None:
     try:
         result = await scheduler.run_once(org_id)
         notification_result = result["notification_result"]
-        assert notification_result["attempted"] == 0
-        assert notification_result["skipped"] is True
-        assert notification_result["skip_reason"] == "durable_outbox_required"
+        assert notification_result["queued"] == 1
+        assert notification_result["accepted"] == 0
+        assert notification_result["delivery_semantics"] == "endpoint_acceptance"
 
         async with session_factory() as session:
             run = (
@@ -188,13 +194,119 @@ async def test_scheduler_persists_fail_closed_notification_summary() -> None:
                     )
                 )
             ).scalar_one()
+            delivery = (
+                await session.execute(
+                    select(NotificationDelivery).where(
+                        NotificationDelivery.operation_run_id == result["run_id"]
+                    )
+                )
+            ).scalar_one()
         assert run.success is True
         assert run.run_metadata["notifications_requested"] is True
         assert run.run_metadata["notification_delivery_mode"] == (
-            "fail_closed_durable_outbox_required"
+            "durable_transactional_outbox"
         )
         assert run.notification_summary == notification_result
         assert audit.details["notification_summary"] == notification_result
+        assert delivery.status == "pending"
+        assert delivery.channel == "webhook"
+        assert "runtime-secret" not in repr(delivery.payload)
+        assert "runtime-secret" not in repr(delivery.target_source_refs)
+    finally:
+        await durable_fence.release()
+        async with session_factory() as session:
+            await session.execute(
+                text("DELETE FROM system_audit_events WHERE org_id = :org_id"),
+                {"org_id": org_id},
+            )
+            await session.execute(
+                text("DELETE FROM observability_operation_runs WHERE org_id = :org_id"),
+                {"org_id": org_id},
+            )
+            await session.execute(
+                text(
+                    "DELETE FROM observability_scheduler_leases "
+                    "WHERE lease_name = :lease_name"
+                ),
+                {"lease_name": lease_name},
+            )
+            await session.commit()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_enqueue_failure_rolls_back_producer_transaction() -> None:
+    engine, session_factory = _isolated_database()
+    org_id = f"scheduler-rollback-{uuid4()}"
+    lease_name = f"test-scheduler-{uuid4()}"
+    durable_fence = PostgresSchedulerDurableFence(
+        session_factory,
+        lease_seconds=30,
+        lease_name=lease_name,
+    )
+    assert await durable_fence.acquire() is True
+
+    class FailingOutbox:
+        async def enqueue_scheduler_run(
+            self,
+            session: AsyncSession,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            session.add(
+                SystemAuditEvent(
+                    occurred_at=utc_now_naive(),
+                    actor_subject="system:test",
+                    actor_roles=["system"],
+                    org_id=org_id,
+                    action="must_rollback",
+                    resource_type="probe",
+                    resource_id=org_id,
+                    success=True,
+                    details={},
+                )
+            )
+            await session.flush()
+            raise RuntimeError("simulated enqueue failure")
+
+        async def drain_ready(self, **_kwargs: object) -> object:
+            raise AssertionError("run_once must not drain")
+
+    scheduler = ObservabilityOperationsScheduler(
+        session_factory,
+        Settings(
+            observability_scheduler_run_detectors=False,
+            observability_scheduler_run_policies=False,
+            observability_scheduler_enable_notifications=True,
+        ),
+        durable_fence=durable_fence,
+        notification_outbox=FailingOutbox(),  # type: ignore[arg-type]
+    )
+    try:
+        with pytest.raises(RuntimeError, match="simulated enqueue failure"):
+            await scheduler.run_once(org_id)
+
+        async with session_factory() as session:
+            run = (
+                await session.execute(
+                    select(ObservabilityOperationRun).where(
+                        ObservabilityOperationRun.org_id == org_id
+                    )
+                )
+            ).scalar_one()
+            producer_probe_count = int(
+                (
+                    await session.execute(
+                        text(
+                            "SELECT count(*) FROM system_audit_events "
+                            "WHERE org_id = :org_id AND action = 'must_rollback'"
+                        ),
+                        {"org_id": org_id},
+                    )
+                ).scalar_one()
+            )
+        assert run.success is False
+        assert run.error_message == "scheduler_run_failed:RuntimeError"
+        assert producer_probe_count == 0
     finally:
         await durable_fence.release()
         async with session_factory() as session:

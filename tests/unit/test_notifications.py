@@ -1,5 +1,7 @@
 """Tests for notification helper functions."""
 
+import asyncio
+
 from typing import Any
 
 import pytest
@@ -12,12 +14,16 @@ from src.services.notifications import (
     collect_policy_notification_target_strings,
     collect_policy_notification_targets,
     merge_runtime_notification_targets,
+    notification_target_fingerprint,
     normalize_webhook_targets,
     runtime_event_severity,
     runtime_notification_gate_result,
     send_runtime_notifications,
+    sanitize_runtime_notification_payload,
     severity_rank,
     skipped_notification_result,
+    validate_notification_https_target,
+    validate_notification_public_dns,
 )
 
 
@@ -131,6 +137,92 @@ def test_classify_notification_targets_splits_channels() -> None:
     assert target_set.pagerduty_routing_keys == ["pd-routing-key"]
 
 
+def test_sanitize_runtime_payload_is_non_mutating_and_drops_nested_secrets() -> None:
+    secret = "https://hooks.example.com/private-token"
+    payload = {
+        "event_type": "observability_runtime_event",
+        "org_id": "acme",
+        "detector_summary": {
+            "created_anomalies": 1,
+            "deduplicated_anomalies": 2,
+            "metadata": {"authorization": "Bearer private"},
+        },
+        "policy_summary": {
+            "evaluated_policies": 1,
+            "breached_policies": 1,
+            "results": [
+                {
+                    "policy_id": "p1",
+                    "breaches": [
+                        {
+                            "trigger_type": "max_cost_usd",
+                            "observed_value": 2,
+                            "threshold_value": 1,
+                        }
+                    ],
+                    "notification_targets": [secret],
+                    "details": {"cookie": "session-secret"},
+                }
+            ],
+        },
+    }
+
+    sanitized = sanitize_runtime_notification_payload(payload)
+
+    assert secret in repr(payload)
+    assert secret not in repr(sanitized)
+    assert "Bearer private" not in repr(sanitized)
+    assert "session-secret" not in repr(sanitized)
+    assert sanitized["policy_summary"]["results"][0]["breaches"][0][
+        "trigger_type"
+    ] == "max_cost_usd"
+
+
+def test_target_fingerprint_is_keyed_and_target_free() -> None:
+    target = "https://hooks.example.com/private-token"
+    first = notification_target_fingerprint(target, "a" * 32)
+    second = notification_target_fingerprint(target, "b" * 32)
+
+    assert first != second
+    assert target not in first
+    assert len(first) == 64
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "http://hooks.example.com/path",
+        "https://user:pass@hooks.example.com/path",
+        "https://hooks.example.com:8443/path",
+        "https://hooks.example.com/path#fragment",
+        "https://127.0.0.1/path",
+        "https://169.254.169.254/path",
+        "https://hooks.example.com.evil.test/path",
+    ],
+)
+def test_notification_target_policy_rejects_ssrf_shapes(target: str) -> None:
+    with pytest.raises(ValueError):
+        validate_notification_https_target(target, ["hooks.example.com"])
+
+
+@pytest.mark.asyncio
+async def test_notification_dns_rejects_mixed_public_private_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+
+    async def mixed_answers(*_args: Any, **_kwargs: Any) -> list[Any]:
+        return [
+            (2, 1, 6, "", ("93.184.216.34", 443)),
+            (2, 1, 6, "", ("127.0.0.1", 443)),
+        ]
+
+    monkeypatch.setattr(loop, "getaddrinfo", mixed_answers)
+
+    with pytest.raises(ValueError, match="public addresses"):
+        await validate_notification_public_dns("https://hooks.example.com/path")
+
+
 def test_runtime_event_severity_prefers_policy_shutdown() -> None:
     severity = runtime_event_severity(
         {
@@ -229,9 +321,11 @@ async def test_send_runtime_notifications_routes_all_channels(monkeypatch) -> No
         body: dict[str, Any],
         max_attempts: int,
         retry_backoff_seconds: float,
+        headers: dict[str, str] | None = None,
     ) -> tuple[bool, str | None]:
-        assert max_attempts == 2
+        assert max_attempts == 1
         assert retry_backoff_seconds == 0.25
+        assert headers is None
         calls.append((target, body))
         return True, None
 
@@ -241,7 +335,16 @@ async def test_send_runtime_notifications_routes_all_channels(monkeypatch) -> No
         "event_type": "observability_runtime_event",
         "org_id": "acme",
         "detector_summary": {"created_anomalies": 2},
-        "policy_summary": {"breached_policies": 1, "results": []},
+        "policy_summary": {
+            "breached_policies": 1,
+            "results": [
+                {
+                    "policy_id": "p1",
+                    "breaches": [{"trigger_type": "max_cost_usd"}],
+                    "notification_targets": ["pagerduty:must-not-leak"],
+                }
+            ],
+        },
     }
     result = await send_runtime_notifications(
         [
@@ -281,6 +384,7 @@ async def test_send_runtime_notifications_routes_all_channels(monkeypatch) -> No
         "pd-global-key",
         "pd-policy-key",
     ]
+    assert "must-not-leak" not in repr(calls)
 
 
 @pytest.mark.asyncio
@@ -294,3 +398,49 @@ async def test_send_runtime_notifications_ignores_invalid_targets() -> None:
     assert result["attempted"] == 0
     assert result["succeeded"] == 0
     assert result["failed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_manual_retry_uses_stable_receiver_idempotency_contract(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_post(
+        _client: Any,
+        *,
+        target: str,
+        body: dict[str, Any],
+        max_attempts: int,
+        retry_backoff_seconds: float,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[bool, str | None]:
+        calls.append(
+            {
+                "target": target,
+                "body": body,
+                "max_attempts": max_attempts,
+                "backoff": retry_backoff_seconds,
+                "headers": headers,
+            }
+        )
+        return True, None
+
+    monkeypatch.setattr(notifications_service, "_post_json_with_retry", fake_post)
+    target = "https://hooks.example.com/idempotent"
+    await send_runtime_notifications(
+        [target, "pagerduty:routing-key"],
+        {"event_type": "manual", "org_id": "acme"},
+        slack_webhooks=[],
+        pagerduty_routing_keys=[],
+        max_attempts=3,
+        idempotent_webhooks=[target],
+        fingerprint_key="f" * 32,
+    )
+
+    webhook_call = next(call for call in calls if call["target"] == target)
+    pagerduty_call = next(
+        call for call in calls if call["target"] == PAGERDUTY_EVENTS_V2_URL
+    )
+    assert webhook_call["max_attempts"] == 3
+    assert len(webhook_call["headers"]["Idempotency-Key"]) == 64
+    assert pagerduty_call["max_attempts"] == 3
+    assert len(pagerduty_call["body"]["dedup_key"]) == 64
