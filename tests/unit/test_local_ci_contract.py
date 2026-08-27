@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tomllib
 from pathlib import Path
@@ -32,6 +33,69 @@ def test_native_push_hook_validates_every_non_delete_ref_by_sha() -> None:
     assert 'if [[ "$local_sha" == "$ZERO_SHA" ]]' in hook
     assert 'bash scripts/local_ci.sh --push "$local_sha"' in hook
     assert 'install -m 0755 "$ROOT_DIR/.githooks/pre-push"' in installer
+
+
+def test_native_push_hook_processes_multiple_refs_and_ignores_deletes(
+    tmp_path: Path,
+) -> None:
+    fake_repo = tmp_path / "repo"
+    fake_bin = tmp_path / "bin"
+    fake_scripts = fake_repo / "scripts"
+    fake_bin.mkdir()
+    fake_scripts.mkdir(parents=True)
+
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [[ "$1 $2" == "rev-parse --show-toplevel" ]]; then\n'
+        '  printf "%s\\n" "$FAKE_REPO_ROOT"\n'
+        "else\n"
+        "  exit 2\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+
+    call_log = tmp_path / "calls.txt"
+    fake_local_ci = fake_scripts / "local_ci.sh"
+    fake_local_ci.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "$2" >> "$CALL_LOG"\n',
+        encoding="utf-8",
+    )
+    fake_local_ci.chmod(0o755)
+
+    first_sha = "1" * 40
+    second_sha = "2" * 40
+    zero_sha = "0" * 40
+    push_input = (
+        f"refs/heads/one {first_sha} refs/heads/one {zero_sha}\n"
+        f"refs/heads/deleted {zero_sha} refs/heads/deleted {first_sha}\n"
+        f"refs/heads/two {second_sha} refs/heads/two {first_sha}\n"
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "CALL_LOG": str(call_log),
+            "FAKE_REPO_ROOT": str(fake_repo),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+
+    result = subprocess.run(
+        ["/bin/bash", str(ROOT_DIR / ".githooks" / "pre-push"), "origin", "unused"],
+        cwd=ROOT_DIR,
+        check=False,
+        capture_output=True,
+        text=True,
+        input=push_input,
+        env=env,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert call_log.read_text(encoding="utf-8").splitlines() == [first_sha, second_sha]
+    assert "deletion does not require local CI" in result.stdout
 
 
 def test_pre_commit_version_supports_the_repository_git_toolchain() -> None:
