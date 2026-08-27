@@ -227,10 +227,22 @@ class Settings(BaseSettings):
         description="Org IDs that scheduler processes",
     )
     observability_scheduler_interval_seconds: int = Field(default=60, ge=5, le=3600)
+    observability_scheduler_lease_seconds: int = Field(
+        default=30,
+        ge=10,
+        le=300,
+        description="Database-backed scheduler leadership lease duration",
+    )
     observability_scheduler_run_detectors: bool = Field(default=True)
     observability_scheduler_run_policies: bool = Field(default=True)
     observability_scheduler_execute_policy_actions: bool = Field(default=True)
-    observability_scheduler_enable_notifications: bool = Field(default=True)
+    observability_scheduler_enable_notifications: bool = Field(
+        default=False,
+        description=(
+            "Request scheduler notifications; delivery remains fail-closed until "
+            "a durable outbox is available"
+        ),
+    )
     observability_active_session_inactivity_minutes: int = Field(
         default=30,
         ge=1,

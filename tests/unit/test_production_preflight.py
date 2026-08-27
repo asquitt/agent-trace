@@ -57,3 +57,11 @@ def test_preflight_warns_on_low_rate_limit_capacity() -> None:
 
     warnings = [result.message for result in results if result.status == "warn"]
     assert any("Rate limit key capacity" in message for message in warnings)
+
+
+def test_preflight_rejects_scheduler_notifications_without_durable_outbox() -> None:
+    settings = Settings(observability_scheduler_enable_notifications=True)
+
+    failures = [result.message for result in run_preflight(settings) if result.status == "fail"]
+
+    assert any("durable outbox delivery" in message for message in failures)

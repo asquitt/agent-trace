@@ -29,14 +29,18 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime-governance
 - Current validation snapshot:
   - `ruff check --select F src tests` passed
   - `pyright` passed (`0 errors`)
-  - `pytest -q tests/unit` passed (`115 passed`)
-  - `pytest -q -o addopts='' tests/integration` passed (`3 passed`) against clean PostgreSQL
+  - `pytest -q tests/unit` passed (`120 passed`)
+  - `pytest -q -o addopts='' tests/integration` passed (`6 passed`) against PostgreSQL,
+    including durable scheduler fencing and fail-closed notification persistence
   - the fail-closed security gate passed against 69 exact hash-locked runtime and build
     dependencies with zero known vulnerabilities
 - Release blockers:
   - production browser session authentication and the product frontend are not built
   - runtime `shutdown`/`throttle` delivery and agent acknowledgement are not implemented;
     current controls are persisted requests and audit records only
+  - automated scheduler outbound notifications are intentionally fail-closed until a
+    durable, idempotent outbox/claim path exists; scheduled runs persist a zero-attempt
+    notification summary with `skip_reason=durable_outbox_required`
   - the latest scheduled [Production Gates run](https://github.com/asquitt/agent-trace/actions/runs/31377820684)
     is red on fleet-dashboard latency
   - retained February 14 E2E, performance, DR, and security reports are historical
@@ -64,7 +68,7 @@ Most LLM observability tools stop at telemetry. AI Trace adds runtime-governance
 | Multi-agent delegation tracing | Shipped | `POST /api/v1/observability/delegations`, `GET /api/v1/observability/chains/{trace_id}` |
 | Memory consistency monitoring | Shipped | `POST /api/v1/observability/memory/snapshots/batch`, `GET /api/v1/observability/memory/consistency` |
 | Cost analytics and risk insights | Shipped | `GET /api/v1/observability/costs/summary`, `GET /api/v1/observability/insights/risk` |
-| Runtime operations and scheduler visibility | Backend beta; leader-fenced | `POST /api/v1/observability/operations/run`, `GET /api/v1/observability/operations/status`, `GET /api/v1/observability/operations/runs` |
+| Runtime operations and scheduler visibility | Backend beta; durable database-fenced; scheduled outbound delivery disabled pending outbox | `POST /api/v1/observability/operations/run`, `GET /api/v1/observability/operations/status`, `GET /api/v1/observability/operations/runs` |
 | Governance audit and SIEM export | Shipped | `GET /api/v1/observability/audit/events`, `POST /api/v1/observability/exports/siem` |
 
 ## Architecture
@@ -231,7 +235,7 @@ aggregate, tenant-free scheduler state.
 
 ## Notification Routing
 
-AI Trace supports mixed target formats for runtime and SIEM notifications:
+Manually triggered runtime operations and SIEM exports support mixed target formats:
 
 - Generic webhook: `https://hooks.example.com/ai-trace`
 - Slack webhook URL: `https://hooks.slack.com/services/...`
@@ -239,6 +243,9 @@ AI Trace supports mixed target formats for runtime and SIEM notifications:
 - PagerDuty routing key: `pagerduty:<routing_key>`
 
 For SIEM export payloads, `notification_targets` is preferred. Legacy `target_webhook` remains supported.
+The background scheduler does not perform outbound delivery. Even when
+`OBSERVABILITY_SCHEDULER_ENABLE_NOTIFICATIONS=true`, it fails closed and records
+`durable_outbox_required`; this flag is reserved until a transactional outbox ships.
 
 ## Configuration
 
@@ -262,10 +269,11 @@ Configure with `.env` (see `.env.example`).
 - `OBSERVABILITY_SCHEDULER_ENABLED`
 - `OBSERVABILITY_SCHEDULER_ORG_IDS`
 - `OBSERVABILITY_SCHEDULER_INTERVAL_SECONDS`
+- `OBSERVABILITY_SCHEDULER_LEASE_SECONDS`
 - `OBSERVABILITY_SCHEDULER_RUN_DETECTORS`
 - `OBSERVABILITY_SCHEDULER_RUN_POLICIES`
 - `OBSERVABILITY_SCHEDULER_EXECUTE_POLICY_ACTIONS`
-- `OBSERVABILITY_SCHEDULER_ENABLE_NOTIFICATIONS`
+- `OBSERVABILITY_SCHEDULER_ENABLE_NOTIFICATIONS` (reserved; must remain `false`)
 - `OBSERVABILITY_DETECTOR_ANOMALY_DEDUPE_WINDOW_MINUTES`
 - `OBSERVABILITY_DETECTOR_ANOMALY_REOPEN_ACKNOWLEDGED`
 
@@ -296,7 +304,9 @@ Configure with `.env` (see `.env.example`).
 1. Enable API auth, tenant enforcement, and request rate limiting.
 2. Use managed Postgres/Redis with backups, restore drills, and secret rotation.
 3. Run migrations as part of deployment rollout.
-4. Scope scheduler orgs explicitly and configure notification channels.
+4. Scope scheduler orgs explicitly. Configure notification channels only for manual
+   runtime/SIEM dispatch, and keep scheduler outbound notifications disabled until the
+   durable outbox ships.
 5. Require approval for shutdown control requests.
 6. Wire `/health/live`, `/health/ready`, and `/metrics` into orchestration and alerting.
 7. Export SIEM bundles into security analytics workflows.

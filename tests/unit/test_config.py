@@ -27,6 +27,8 @@ def test_shipped_env_example_loads_with_local_compose_contract() -> None:
         "http://127.0.0.1:3000",
     ]
     assert settings.observability_scheduler_org_ids == ["acme"]
+    assert settings.observability_scheduler_lease_seconds == 30
+    assert settings.observability_scheduler_enable_notifications is False
     assert settings.observability_active_session_inactivity_minutes == 30
     assert settings.observability_notification_webhooks == []
     assert settings.observability_notification_slack_webhooks == []

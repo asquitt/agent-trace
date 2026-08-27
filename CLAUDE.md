@@ -169,7 +169,8 @@ alembic upgrade head                    # Run migrations
 ## Key Patterns
 
 ### Policy Actions
-- `alert` → notify via webhook/Slack/PagerDuty
+- `alert` → persist alert/control evidence; manual runtime endpoints may dispatch via
+  webhook/Slack/PagerDuty, while scheduler dispatch is fail-closed pending a durable outbox
 - `throttle` → persist a control request for a future runtime adapter
 - `approve` → require human approval
 - `shutdown` → persist an approval-gated control request for a future runtime adapter

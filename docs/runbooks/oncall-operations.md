@@ -10,9 +10,11 @@ Last updated: August 27, 2026
 ## Shift Start Checklist
 
 1. Confirm monitoring pipelines are green.
-2. Confirm alert routing to PagerDuty/Slack.
+2. Confirm platform-monitoring and manual delivery routes to PagerDuty/Slack.
 3. Confirm latest deployment and migration state.
 4. Confirm latest backup/restore drill report is passing.
+5. Confirm scheduler notification summaries show zero attempts and
+   `durable_outbox_required` while automated delivery remains fail-closed.
 
 ## Alert Triage Priorities
 

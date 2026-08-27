@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from typing import Any, cast
 
 import pytest
@@ -12,6 +13,8 @@ from src.config import Settings
 from src.services.operations_scheduler import (
     ObservabilityOperationsScheduler,
     PostgresAdvisoryLeadershipLock,
+    SchedulerDurableFence,
+    SchedulerFenceLost,
     SchedulerLeadershipLock,
 )
 
@@ -47,6 +50,59 @@ class FakeLeadershipLock:
         self.release_calls += 1
         if self.coordinator.owner is self:
             self.coordinator.owner = None
+
+
+class FakeDurableFenceCoordinator:
+    """Shared lease state with a monotonic fencing token."""
+
+    def __init__(self) -> None:
+        self.owner: FakeDurableFence | None = None
+        self.token = 0
+
+
+class FakeDurableFence:
+    def __init__(self, coordinator: FakeDurableFenceCoordinator | None = None) -> None:
+        self.coordinator = coordinator or FakeDurableFenceCoordinator()
+        self.token: int | None = None
+        self.renew_enabled = True
+        self.release_calls = 0
+
+    async def acquire(self) -> bool:
+        if self.coordinator.owner not in (None, self):
+            return False
+        self.coordinator.token += 1
+        self.token = self.coordinator.token
+        self.coordinator.owner = self
+        return True
+
+    async def renew(self) -> bool:
+        return (
+            self.renew_enabled
+            and self.coordinator.owner is self
+            and self.token == self.coordinator.token
+        )
+
+    @asynccontextmanager
+    async def transaction(self, session: Any) -> Any:
+        if not await self.renew():
+            await session.rollback()
+            raise SchedulerFenceLost("fake scheduler fence lost")
+        try:
+            yield
+            await session.commit()
+        except BaseException:
+            await session.rollback()
+            raise
+
+    async def commit(self, session: Any) -> None:
+        async with self.transaction(session):
+            pass
+
+    async def release(self) -> None:
+        self.release_calls += 1
+        if self.coordinator.owner is self and self.token == self.coordinator.token:
+            self.coordinator.owner = None
+        self.token = None
 
 
 class FakeScalarResult:
@@ -115,6 +171,34 @@ class FakeAdvisoryEngine:
         return self.connection
 
 
+class FakeRunSession:
+    def __init__(self) -> None:
+        self.commits = 0
+        self.rollbacks = 0
+
+    async def __aenter__(self) -> FakeRunSession:
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+    async def rollback(self) -> None:
+        self.rollbacks += 1
+
+
+class FakeRunSessionFactory:
+    def __init__(self) -> None:
+        self.sessions: list[FakeRunSession] = []
+
+    def __call__(self) -> FakeRunSession:
+        session = FakeRunSession()
+        self.sessions.append(session)
+        return session
+
+
 def _settings(**overrides: Any) -> Settings:
     values: dict[str, Any] = {
         "observability_scheduler_enabled": False,
@@ -131,6 +215,10 @@ def _session_factory_stub() -> async_sessionmaker:
 
 def _leadership_lock_stub() -> SchedulerLeadershipLock:
     return FakeLeadershipLock()
+
+
+def _durable_fence_stub() -> SchedulerDurableFence:
+    return FakeDurableFence()
 
 
 @pytest.mark.asyncio
@@ -287,6 +375,7 @@ async def test_scheduler_does_not_start_when_disabled() -> None:
         _session_factory_stub(),
         _settings(observability_scheduler_enabled=False),
         leadership_lock=_leadership_lock_stub(),
+        durable_fence=_durable_fence_stub(),
     )
 
     await scheduler.start()
@@ -303,6 +392,7 @@ async def test_scheduler_does_not_start_without_org_targets() -> None:
         _session_factory_stub(),
         _settings(observability_scheduler_enabled=True, observability_scheduler_org_ids=[]),
         leadership_lock=_leadership_lock_stub(),
+        durable_fence=_durable_fence_stub(),
     )
 
     await scheduler.start()
@@ -327,6 +417,7 @@ async def test_scheduler_start_stop_updates_running_state(monkeypatch: pytest.Mo
         _session_factory_stub(),
         _settings(observability_scheduler_enabled=True, observability_scheduler_org_ids=["acme"]),
         leadership_lock=_leadership_lock_stub(),
+        durable_fence=_durable_fence_stub(),
     )
 
     await scheduler.start()
@@ -356,6 +447,7 @@ async def test_scheduler_continues_when_one_org_run_fails(monkeypatch: pytest.Mo
         _session_factory_stub(),
         _settings(observability_scheduler_enabled=True, observability_scheduler_org_ids=[bad_org, good_org]),
         leadership_lock=_leadership_lock_stub(),
+        durable_fence=_durable_fence_stub(),
     )
 
     await scheduler.start()
@@ -372,10 +464,71 @@ async def test_scheduler_continues_when_one_org_run_fails(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("notifications_requested", "expected_reason"),
+    [
+        (False, "scheduler_notifications_disabled"),
+        (True, "durable_outbox_required"),
+    ],
+)
+async def test_scheduler_notifications_fail_closed_without_outbox(
+    monkeypatch: pytest.MonkeyPatch,
+    notifications_requested: bool,
+    expected_reason: str,
+) -> None:
+    async def forbidden_dispatch(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("scheduler must not perform outbound notification I/O")
+
+    monkeypatch.setattr(
+        "src.services.notifications.send_runtime_notifications",
+        forbidden_dispatch,
+    )
+    session_factory = FakeRunSessionFactory()
+    durable_fence = FakeDurableFence()
+    assert await durable_fence.acquire() is True
+    scheduler = ObservabilityOperationsScheduler(
+        cast(async_sessionmaker, session_factory),
+        _settings(
+            observability_scheduler_run_detectors=False,
+            observability_scheduler_run_policies=False,
+            observability_scheduler_enable_notifications=notifications_requested,
+        ),
+        leadership_lock=_leadership_lock_stub(),
+        durable_fence=durable_fence,
+    )
+    finished: dict[str, Any] = {}
+
+    async def fake_start_run_row(org_id: str) -> str:
+        assert org_id == "acme"
+        return "run-1"
+
+    async def fake_finish_run_row(run_id: str, **kwargs: Any) -> None:
+        finished.update({"run_id": run_id, **kwargs})
+
+    monkeypatch.setattr(scheduler, "_start_run_row", fake_start_run_row)
+    monkeypatch.setattr(scheduler, "_finish_run_row", fake_finish_run_row)
+
+    result = await scheduler.run_once("acme")
+
+    notification_result = result["notification_result"]
+    assert notification_result["attempted"] == 0
+    assert notification_result["succeeded"] == 0
+    assert notification_result["failed"] == 0
+    assert notification_result["skipped"] is True
+    assert notification_result["skip_reason"] == expected_reason
+    assert finished["notification_summary"] == notification_result
+    assert scheduler._state["org_runs"]["acme"]["last_notification_result"] == (  # noqa: SLF001
+        notification_result
+    )
+    assert session_factory.sessions[0].commits == 1
+
+
+@pytest.mark.asyncio
 async def test_only_advisory_lock_leader_runs_scheduler_cycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     coordinator = FakeLeadershipCoordinator()
+    durable_coordinator = FakeDurableFenceCoordinator()
     first_lock = FakeLeadershipLock(coordinator)
     second_lock = FakeLeadershipLock(coordinator)
     cycle_started = asyncio.Event()
@@ -396,10 +549,16 @@ async def test_only_advisory_lock_leader_runs_scheduler_cycle(
         observability_scheduler_org_ids=["acme"],
     )
     first = ObservabilityOperationsScheduler(
-        _session_factory_stub(), settings, leadership_lock=first_lock
+        _session_factory_stub(),
+        settings,
+        leadership_lock=first_lock,
+        durable_fence=FakeDurableFence(durable_coordinator),
     )
     second = ObservabilityOperationsScheduler(
-        _session_factory_stub(), settings, leadership_lock=second_lock
+        _session_factory_stub(),
+        settings,
+        leadership_lock=second_lock,
+        durable_fence=FakeDurableFence(durable_coordinator),
     )
 
     await asyncio.gather(first.start(), second.start())
@@ -425,6 +584,7 @@ async def test_standby_takes_over_after_leader_releases_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     coordinator = FakeLeadershipCoordinator()
+    durable_coordinator = FakeDurableFenceCoordinator()
     first_lock = FakeLeadershipLock(coordinator)
     second_lock = FakeLeadershipLock(coordinator)
     first_cycle = asyncio.Event()
@@ -450,10 +610,16 @@ async def test_standby_takes_over_after_leader_releases_lock(
         observability_scheduler_org_ids=["acme"],
     )
     first = ObservabilityOperationsScheduler(
-        _session_factory_stub(), settings, leadership_lock=first_lock
+        _session_factory_stub(),
+        settings,
+        leadership_lock=first_lock,
+        durable_fence=FakeDurableFence(durable_coordinator),
     )
     second = ObservabilityOperationsScheduler(
-        _session_factory_stub(), settings, leadership_lock=second_lock
+        _session_factory_stub(),
+        settings,
+        leadership_lock=second_lock,
+        durable_fence=FakeDurableFence(durable_coordinator),
     )
 
     await first.start()
@@ -475,11 +641,12 @@ async def test_standby_takes_over_after_leader_releases_lock(
 
 
 @pytest.mark.asyncio
-async def test_execution_fence_prevents_overlap_after_leadership_connection_loss(
+async def test_durable_fence_prevents_overlap_after_both_advisory_connections_are_lost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     leadership_coordinator = FakeLeadershipCoordinator()
     execution_coordinator = FakeLeadershipCoordinator()
+    durable_coordinator = FakeDurableFenceCoordinator()
     first_leadership = FakeLeadershipLock(leadership_coordinator)
     second_leadership = FakeLeadershipLock(leadership_coordinator)
     first_execution = FakeLeadershipLock(execution_coordinator)
@@ -519,22 +686,26 @@ async def test_execution_fence_prevents_overlap_after_leadership_connection_loss
         settings,
         leadership_lock=first_leadership,
         execution_lock=first_execution,
+        durable_fence=FakeDurableFence(durable_coordinator),
     )
     second = ObservabilityOperationsScheduler(
         _session_factory_stub(),
         settings,
         leadership_lock=second_leadership,
         execution_lock=second_execution,
+        durable_fence=FakeDurableFence(durable_coordinator),
     )
 
     await first.start()
     await asyncio.wait_for(first_run_started.wait(), timeout=1)
 
-    # Model the dedicated leadership connection disappearing while the first
-    # replica is inside database/notification work. It cannot reacquire, while
-    # its independent execution fence remains held until the side effects end.
+    # Model a common-mode database connection reset destroying both advisory
+    # sessions while the first replica is still inside its run. The durable
+    # lease remains owned, so the replacement cannot overlap the old process.
     leadership_coordinator.owner = None
+    execution_coordinator.owner = None
     first_leadership.acquire_enabled = False
+    first_execution.acquire_enabled = False
     await second.start()
     for _ in range(50):
         if second.status()["leadership_state"] == "standby":
@@ -542,7 +713,7 @@ async def test_execution_fence_prevents_overlap_after_leadership_connection_loss
         await asyncio.sleep(0)
 
     assert second.status()["is_leader"] is False
-    assert execution_coordinator.owner is first_execution
+    assert durable_coordinator.owner is first._durable_fence  # noqa: SLF001
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(second_run_started.wait(), timeout=0.05)
 
@@ -583,6 +754,7 @@ async def test_leadership_connection_error_fails_closed(
             observability_scheduler_org_ids=["first", "must-not-run"],
         ),
         leadership_lock=leadership_lock,
+        durable_fence=_durable_fence_stub(),
     )
 
     await scheduler.start()

@@ -32,7 +32,8 @@ Rotates all AI Trace production secrets without downtime.
 - An authenticated `/metrics` request made with the separately rotated global
   monitoring credential reports scheduler health as `healthy` or the expected
   non-`degraded` state.
-- Notification delivery smoke test succeeds.
+- Manual runtime/SIEM notification delivery smoke tests succeed; scheduler operation
+  records show zero delivery attempts and the expected `durable_outbox_required` skip.
 - Authenticated API requests succeed with newly rotated keys.
 
 ## Maximum Secret Age Targets
