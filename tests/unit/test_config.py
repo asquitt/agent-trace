@@ -15,7 +15,7 @@ from src.config import Settings
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_shipped_env_example_loads_with_local_compose_contract() -> None:
+def test_internal_env_example_loads_with_fail_closed_contract() -> None:
     """The documented clean-clone environment must be directly loadable."""
     with patch.dict(os.environ, {}, clear=True):
         settings = Settings(_env_file=PROJECT_ROOT / ".env.example")
@@ -23,13 +23,19 @@ def test_shipped_env_example_loads_with_local_compose_contract() -> None:
     assert settings.database_url.endswith("@localhost:5434/ai_trace")
     assert settings.api_auth_enabled is True
     assert settings.api_require_tenant_header is True
+    assert settings.api_rate_limit_enabled is True
+    assert settings.trace_capture_prompts is False
+    assert settings.runtime_governance_enabled is False
+    assert settings.observability_scheduler_enabled is False
+    assert settings.observability_scheduler_run_policies is False
+    assert settings.observability_scheduler_execute_policy_actions is False
     assert settings.api_keys == ["replace-me:local-operator:viewer|operator|admin:acme"]
     assert settings.browser_session_cookie_secure is False
     assert settings.cors_origins == [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
     ]
-    assert settings.observability_scheduler_org_ids == ["acme"]
+    assert settings.observability_scheduler_org_ids == []
     assert settings.observability_scheduler_lease_seconds == 30
     assert settings.observability_scheduler_enable_notifications is False
     assert settings.observability_active_session_inactivity_minutes == 30
@@ -83,7 +89,7 @@ def test_kubernetes_scheduler_scalar_is_a_valid_list_setting() -> None:
     config_map = (PROJECT_ROOT / "deploy" / "k8s" / "runtime-configmap.yaml").read_text(
         encoding="utf-8"
     )
-    match = re.search(r'^\s*scheduler_org_ids:\s*"([^"]+)"\s*$', config_map, re.MULTILINE)
+    match = re.search(r'^\s*scheduler_org_ids:\s*"([^"]*)"\s*$', config_map, re.MULTILINE)
     assert match is not None
 
     with patch.dict(
@@ -93,7 +99,22 @@ def test_kubernetes_scheduler_scalar_is_a_valid_list_setting() -> None:
     ):
         settings = Settings(_env_file=None)
 
-    assert settings.observability_scheduler_org_ids == ["prod-org"]
+    assert settings.observability_scheduler_org_ids == []
+
+
+def test_application_defaults_are_internal_and_fail_closed() -> None:
+    with patch.dict(os.environ, {}, clear=True):
+        settings = Settings(_env_file=None)
+
+    assert settings.api_auth_enabled is True
+    assert settings.api_require_tenant_header is True
+    assert settings.api_rate_limit_enabled is True
+    assert settings.trace_capture_prompts is False
+    assert settings.runtime_governance_enabled is False
+    assert settings.observability_scheduler_enabled is False
+    assert settings.observability_scheduler_run_policies is False
+    assert settings.observability_scheduler_execute_policy_actions is False
+    assert settings.observability_scheduler_enable_notifications is False
 
 
 def test_active_session_inactivity_threshold_defaults_and_validates() -> None:

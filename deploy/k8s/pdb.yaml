@@ -1,8 +1,9 @@
+# FROZEN MANUAL REFERENCE: not applied by this repository and not deployment evidence.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: ai-trace-api
-  namespace: ai-trace-prod
+  namespace: ai-trace-internal
 spec:
   minAvailable: 2
   selector:

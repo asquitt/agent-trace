@@ -53,7 +53,7 @@ def test_authenticate_request_with_valid_api_key() -> None:
 def test_authenticate_request_rejects_missing_key() -> None:
     settings = Settings(api_auth_enabled=True, api_keys=["k:s:viewer:acme"])
     with pytest.raises(HTTPException) as exc:
-        authenticate_request(_make_request(), settings)
+        authenticate_request(_make_request({"X-Org-Id": "acme"}), settings)
     assert exc.value.status_code == 401
 
 

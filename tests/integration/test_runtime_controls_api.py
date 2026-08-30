@@ -37,6 +37,7 @@ from src.utils.time import utc_now_naive
 @pytest.fixture()
 def runtime_client() -> tuple[TestClient, Settings]:
     settings = Settings(
+        runtime_governance_enabled=True,
         api_auth_enabled=True,
         api_require_tenant_header=True,
         api_keys=[
@@ -522,6 +523,7 @@ def test_runtime_control_tenant_lease_ack_and_shutdown_projection(
                     lease_seconds=60,
                     max_delivery_attempts=3,
                     max_items=10,
+                    runtime_governance_enabled=True,
                 )
                 await db.commit()
                 return rows

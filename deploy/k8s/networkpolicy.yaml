@@ -1,8 +1,9 @@
+# FROZEN MANUAL REFERENCE: not applied by this repository and not deployment evidence.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: ai-trace-api
-  namespace: ai-trace-prod
+  namespace: ai-trace-internal
 spec:
   podSelector:
     matchLabels:
@@ -29,17 +30,9 @@ spec:
     - to:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: ai-trace-prod
+              kubernetes.io/metadata.name: ai-trace-internal
       ports:
         - protocol: TCP
           port: 5432
         - protocol: TCP
           port: 6379
-    - to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
-      ports:
-        - protocol: TCP
-          port: 443
-        - protocol: TCP
-          port: 80

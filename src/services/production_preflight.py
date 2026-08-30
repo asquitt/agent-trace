@@ -113,6 +113,21 @@ def run_preflight(settings: Settings) -> list[CheckResult]:
         ),
         _bool_check(
             lambda: (
+                settings.runtime_governance_enabled
+                or (
+                    not settings.observability_scheduler_enabled
+                    and not settings.observability_scheduler_run_policies
+                    and not settings.observability_scheduler_execute_policy_actions
+                    and not settings.observability_scheduler_enable_notifications
+                )
+            ),
+            (
+                "Disabled runtime governance requires the scheduler, policy loop, "
+                "policy actions, and notifications to remain disabled."
+            ),
+        ),
+        _bool_check(
+            lambda: (
                 not settings.observability_scheduler_enabled
                 or len(settings.observability_scheduler_org_ids) > 0
             ),

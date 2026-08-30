@@ -23,6 +23,7 @@ from ..models.observability import (
     SystemAuditEvent,
 )
 from ..utils.time import utc_now_naive
+from .runtime_governance import require_runtime_governance_enabled
 
 
 class RuntimeControlNotFoundError(Exception):
@@ -199,9 +200,11 @@ async def claim_runtime_controls(
     lease_seconds: int,
     max_delivery_attempts: int,
     max_items: int,
+    runtime_governance_enabled: bool = False,
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Lease pending or expired commands to one authenticated runtime instance."""
+    require_runtime_governance_enabled(runtime_governance_enabled)
     claimed_at = now or utc_now_naive()
     await _validate_runtime_scope(
         db,

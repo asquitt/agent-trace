@@ -1,3 +1,4 @@
+# FROZEN MANUAL REFERENCE: not applied by this repository and not deployment evidence.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -28,7 +29,7 @@ spec:
     - name: ai-trace-runtime
       rules:
         - alert: AITraceDeploymentUnavailable
-          expr: kube_deployment_status_replicas_unavailable{namespace="ai-trace-prod",deployment="ai-trace-api"} > 0
+          expr: kube_deployment_status_replicas_unavailable{namespace="ai-trace-internal",deployment="ai-trace-api"} > 0
           for: 5m
           labels:
             severity: critical
@@ -37,7 +38,7 @@ spec:
             summary: "AI Trace deployment has unavailable replicas"
             description: "At least one ai-trace-api pod is unavailable for more than 5 minutes."
         - alert: AITracePodCrashLooping
-          expr: increase(kube_pod_container_status_restarts_total{namespace="ai-trace-prod",container="api"}[15m]) > 2
+          expr: increase(kube_pod_container_status_restarts_total{namespace="ai-trace-internal",container="api"}[15m]) > 2
           for: 5m
           labels:
             severity: critical

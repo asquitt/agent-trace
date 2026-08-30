@@ -1,9 +1,16 @@
 # AI Trace Phase 1 Foundation Plan + Phase 2 Runtime Control + Phase 3 Production Hardening Addendum
 
+> Historical design and local implementation record. Terms such as `completed`, `shipped`,
+> `production`, and `release` describe repository scope or past local validation only. This
+> document does not establish a current hosted deployment, automatic workload, provider
+> integration, retained evidence artifact, or customer outcome.
+
 **Document date:** February 14, 2026  
 **Execution window:** February 17, 2026 to February 28, 2026  
 **Scope:** Build the production foundation for fleet/session/delegation observability before dashboard UI polish.
-**Implementation status:** Phase 1 + Phase 2 + Phase 3 production hardening + deep trace API/storage integration cleanup + strict CI type-gate stabilization + production gate sweep completed on February 14, 2026 (accelerated delivery)
+**Historical implementation status:** Phase 1 + Phase 2 + Phase 3 repository work and a
+local gate sweep were reported complete on February 14, 2026. This is not current validation or
+production evidence.
 
 ## Implementation Log (Completed)
 
@@ -34,7 +41,7 @@
     - `scripts/run_full_e2e.sh` (`60 passed`, migration replay pass, second test pass)
   - Migration replay in isolated virtualenv: `upgrade head -> downgrade 001 -> upgrade head` succeeded
   - Endpoint smoke checks succeeded for deployment/session/action/delegation/anomaly/dashboard/cost/memory/anomaly-list/chains paths
-  - Production gate artifacts generated and passing:
+  - Historical local gate artifacts were reported passing but are not retained in this tree:
     - perf gate: `docs/reports/perf/perf-gate-20260214T194058Z.json`
     - DR drill: `docs/reports/dr/backup-restore-drill-20260214T194129Z.json`
     - security gate: `docs/reports/security/security-gate-20260214T194129Z.json`
@@ -175,8 +182,8 @@
   - non-root runtime user in Docker image
   - deterministic startup entrypoint with migration switch
   - Docker build-context reduction via `.dockerignore`
-- Added CI pipeline:
-  - `.github/workflows/ci.yml` (lint, type-check, migration replay, tests, Docker build smoke)
+- Added a CI pipeline at the time; it was later removed in favor of repository-owned local gates:
+  - historical `.github/workflows/ci.yml` (lint, type-check, migration replay, tests, Docker build smoke)
 
 ### Validation evidence
 

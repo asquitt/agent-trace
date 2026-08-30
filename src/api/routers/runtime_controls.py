@@ -14,6 +14,10 @@ from ...services.runtime_controls import (
     acknowledge_runtime_control,
     claim_runtime_controls,
 )
+from ...services.runtime_governance import (
+    RuntimeGovernanceDisabledError,
+    require_runtime_governance,
+)
 
 router = APIRouter(prefix="/api/v1/runtime-controls", tags=["runtime-controls"])
 
@@ -68,6 +72,13 @@ async def claim_controls(
     auth: AuthDep,
 ) -> RuntimeControlClaimResponse:
     _require_runtime_auth(auth, body.org_id)
+    try:
+        require_runtime_governance(settings)
+    except RuntimeGovernanceDisabledError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     async with storage.session_factory() as db:
         try:
             controls = await claim_runtime_controls(
@@ -81,6 +92,7 @@ async def claim_controls(
                 lease_seconds=settings.runtime_control_lease_seconds,
                 max_delivery_attempts=settings.runtime_control_max_delivery_attempts,
                 max_items=body.max_items,
+                runtime_governance_enabled=settings.runtime_governance_enabled,
             )
             await db.commit()
         except (RuntimeControlNotFoundError, RuntimeControlConflictError) as exc:

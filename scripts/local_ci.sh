@@ -4,6 +4,7 @@ set -uo pipefail
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_DIR="${LOCAL_CI_ROOT_OVERRIDE:-$SCRIPT_ROOT}"
 cd "$ROOT_DIR"
+export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 MODE="${1:-}"
 if [[ "$MODE" != "--commit" && "$MODE" != "--push" && "$MODE" != "--push-tree" ]]; then

@@ -1,7 +1,8 @@
+# FROZEN MANUAL REFERENCE: not applied by this repository and not deployment evidence.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: ai-trace-runtime-config
-  namespace: ai-trace-prod
+  namespace: ai-trace-internal
 data:
-  scheduler_org_ids: "prod-org"
+  scheduler_org_ids: ""

@@ -1,3 +1,4 @@
+# FROZEN MANUAL REFERENCE: not applied by this repository and not deployment evidence.
 apiVersion: monitoring.coreos.com/v1
 kind: Probe
 metadata:
@@ -11,4 +12,4 @@ spec:
   targets:
     staticConfig:
       static:
-        - https://ai-trace.example.com/health/ready
+        - http://ai-trace-api.ai-trace-internal.svc.cluster.local:8000/health/ready

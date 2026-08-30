@@ -161,7 +161,7 @@ class Settings(BaseSettings):
         description="Interval for flushing trace buffer",
     )
     trace_capture_prompts: bool = Field(
-        default=True,
+        default=False,
         description="Capture full prompts/responses in traces",
     )
 
@@ -191,13 +191,13 @@ class Settings(BaseSettings):
 
     # API auth and tenancy controls
     api_auth_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Enable API key authentication",
     )
     api_key_header: str = Field(default="X-API-Key")
     api_tenant_header: str = Field(default="X-Org-Id")
     api_require_tenant_header: bool = Field(
-        default=False,
+        default=True,
         description="Require tenant org header for authenticated requests",
     )
     api_keys: list[str] = Field(
@@ -220,7 +220,7 @@ class Settings(BaseSettings):
         min_length=1,
         description="Directory containing the built same-origin operator console",
     )
-    api_rate_limit_enabled: bool = Field(default=False)
+    api_rate_limit_enabled: bool = Field(default=True)
     api_rate_limit_requests_per_window: int = Field(default=240, ge=1, le=100000)
     api_rate_limit_window_seconds: int = Field(default=60, ge=1, le=3600)
     api_rate_limit_per_path: bool = Field(default=False)
@@ -233,6 +233,12 @@ class Settings(BaseSettings):
     )
 
     # Observability runtime operations
+    runtime_governance_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable autonomous policy actions, runtime-control delivery, and outbound notifications"
+        ),
+    )
     observability_scheduler_enabled: bool = Field(
         default=False,
         description="Enable background scheduler for detector/policy loops",
@@ -249,8 +255,8 @@ class Settings(BaseSettings):
         description="Database-backed scheduler leadership lease duration",
     )
     observability_scheduler_run_detectors: bool = Field(default=True)
-    observability_scheduler_run_policies: bool = Field(default=True)
-    observability_scheduler_execute_policy_actions: bool = Field(default=True)
+    observability_scheduler_run_policies: bool = Field(default=False)
+    observability_scheduler_execute_policy_actions: bool = Field(default=False)
     runtime_control_lease_seconds: int = Field(
         default=60,
         ge=10,

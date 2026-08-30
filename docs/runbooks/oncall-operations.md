@@ -2,6 +2,9 @@
 
 Last updated: August 27, 2026
 
+> Status: Frozen manual reference for a future host-owned integration. No AI Trace on-call
+> rotation, hosted monitoring target, or production deployment is established by this repository.
+
 ## On-Call Rotation
 
 - Primary: owns initial response and mitigation.

@@ -159,6 +159,7 @@ async def test_scheduler_atomically_persists_notification_outbox() -> None:
     scheduler = ObservabilityOperationsScheduler(
         session_factory,
         Settings(
+            runtime_governance_enabled=True,
             observability_scheduler_run_detectors=False,
             observability_scheduler_run_policies=False,
             observability_scheduler_enable_notifications=True,
@@ -274,6 +275,7 @@ async def test_scheduler_enqueue_failure_rolls_back_producer_transaction() -> No
     scheduler = ObservabilityOperationsScheduler(
         session_factory,
         Settings(
+            runtime_governance_enabled=True,
             observability_scheduler_run_detectors=False,
             observability_scheduler_run_policies=False,
             observability_scheduler_enable_notifications=True,

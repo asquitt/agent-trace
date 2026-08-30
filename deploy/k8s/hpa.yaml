@@ -1,8 +1,9 @@
+# FROZEN MANUAL REFERENCE: not applied by this repository and not deployment evidence.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: ai-trace-api
-  namespace: ai-trace-prod
+  namespace: ai-trace-internal
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
