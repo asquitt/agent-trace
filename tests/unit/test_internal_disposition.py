@@ -34,6 +34,7 @@ from src.api.routers.runtime_controls import (
 )
 from src.config import Settings
 from src.security import AuthContext
+from src.services import notifications as notification_service
 from src.services.notification_outbox import NotificationOutboxService
 from src.services.observability_runtime import evaluate_budget_policies
 from src.services.runtime_controls import (
@@ -77,6 +78,30 @@ async def test_frozen_outbox_rejects_before_accessing_storage() -> None:
 
     with pytest.raises(RuntimeGovernanceDisabledError, match="runtime_governance_disabled"):
         await service.drain_ready(org_id="acme", limit=1)
+
+
+@pytest.mark.asyncio
+async def test_frozen_direct_notification_helpers_reject_before_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_delivery(**_kwargs: Any) -> tuple[bool, str | None]:
+        raise AssertionError("delivery must not start while governance is frozen")
+
+    monkeypatch.setattr(notification_service, "_post_json_with_retry", fail_delivery)
+
+    with pytest.raises(RuntimeGovernanceDisabledError, match="runtime_governance_disabled"):
+        await notification_service.send_runtime_notifications(
+            ["https://hooks.example.com/events"],
+            {"event_type": "frozen"},
+            slack_webhooks=[],
+            pagerduty_routing_keys=[],
+        )
+
+    with pytest.raises(RuntimeGovernanceDisabledError, match="runtime_governance_disabled"):
+        await notification_service.send_webhook_notifications(
+            ["https://hooks.example.com/events"],
+            {"event_type": "frozen"},
+        )
 
 
 @pytest.mark.asyncio

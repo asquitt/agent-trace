@@ -19,6 +19,8 @@ import httpx
 import structlog
 from pydantic import SecretStr
 
+from .runtime_governance import require_runtime_governance_enabled
+
 logger = structlog.get_logger(__name__)
 PAGERDUTY_EVENTS_V2_URL = "https://events.pagerduty.com/v2/enqueue"
 NOTIFICATION_FINALIZATION_MARGIN_SECONDS = 5.0
@@ -662,8 +664,10 @@ async def send_runtime_notifications(
     allowed_hosts: list[str] | None = None,
     idempotent_webhooks: Sequence[str | SecretStr] = (),
     fingerprint_key: str | SecretStr = "",
+    runtime_governance_enabled: bool = False,
 ) -> dict[str, Any]:
     """Send runtime notifications across webhook, Slack, and PagerDuty channels."""
+    require_runtime_governance_enabled(runtime_governance_enabled)
     payload = sanitize_runtime_notification_payload(payload)
     fingerprint_secret = (
         fingerprint_key.get_secret_value()
@@ -834,6 +838,7 @@ async def send_webhook_notifications(
     timeout_seconds: float = 5.0,
     max_attempts: int = 3,
     retry_backoff_seconds: float = 0.5,
+    runtime_governance_enabled: bool = False,
 ) -> dict[str, Any]:
     """Backward-compatible webhook-only notification wrapper."""
     result = await send_runtime_notifications(
@@ -844,6 +849,7 @@ async def send_webhook_notifications(
         timeout_seconds=timeout_seconds,
         max_attempts=max_attempts,
         retry_backoff_seconds=retry_backoff_seconds,
+        runtime_governance_enabled=runtime_governance_enabled,
     )
     return {
         "attempted": result["attempted"],

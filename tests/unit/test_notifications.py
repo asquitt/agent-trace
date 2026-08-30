@@ -372,6 +372,7 @@ async def test_send_runtime_notifications_routes_all_channels(monkeypatch) -> No
         pagerduty_routing_keys=["pd-global-key"],
         max_attempts=2,
         retry_backoff_seconds=0.25,
+        runtime_governance_enabled=True,
     )
 
     assert result["attempted"] == 5
@@ -409,6 +410,7 @@ async def test_send_runtime_notifications_ignores_invalid_targets() -> None:
         {"event_type": "observability_runtime_event", "org_id": "acme"},
         slack_webhooks=[],
         pagerduty_routing_keys=[],
+        runtime_governance_enabled=True,
     )
     assert result["attempted"] == 0
     assert result["succeeded"] == 0
@@ -452,6 +454,7 @@ async def test_manual_retry_uses_stable_receiver_idempotency_contract(monkeypatc
         max_attempts=3,
         idempotent_webhooks=[target],
         fingerprint_key="f" * 32,
+        runtime_governance_enabled=True,
     )
 
     webhook_call = next(call for call in calls if call["target"] == target)

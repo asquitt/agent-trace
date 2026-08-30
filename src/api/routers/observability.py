@@ -574,6 +574,7 @@ async def _dispatch_runtime_notifications(
         allowed_hosts=settings.observability_notification_allowed_hosts,
         idempotent_webhooks=settings.observability_notification_idempotent_webhooks,
         fingerprint_key=settings.observability_notification_fingerprint_key,
+        runtime_governance_enabled=settings.runtime_governance_enabled,
     )
     result["event_severity"] = event_severity
     result["min_severity"] = min_severity
@@ -3815,6 +3816,7 @@ async def export_siem_events(
             allowed_hosts=settings.observability_notification_allowed_hosts,
             idempotent_webhooks=settings.observability_notification_idempotent_webhooks,
             fingerprint_key=settings.observability_notification_fingerprint_key,
+            runtime_governance_enabled=settings.runtime_governance_enabled,
         )
 
     await _store_audit_event(
