@@ -5,14 +5,6 @@ SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_DIR="${LOCAL_CI_ROOT_OVERRIDE:-$SCRIPT_ROOT}"
 cd "$ROOT_DIR"
 
-# Git hooks export repository-local variables. Clear them before this script
-# opens the detached validation clone, or Git can keep targeting the caller.
-while IFS= read -r local_git_env_var; do
-  unset "$local_git_env_var"
-done < <(git rev-parse --local-env-vars)
-
-export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
-
 MODE="${1:-}"
 if [[ "$MODE" != "--commit" && "$MODE" != "--push" && "$MODE" != "--push-tree" ]]; then
   echo "usage: $0 --commit|--push [ref]|--push-tree <sha>" >&2
@@ -22,6 +14,16 @@ if [[ "$MODE" == "--commit" && "$#" -ne 1 ]] || [[ "$MODE" == "--push" && "$#" -
   echo "usage: $0 --commit|--push [ref]|--push-tree <sha>" >&2
   exit 2
 fi
+
+# Pre-commit must retain Git's prepared GIT_INDEX_FILE. Push modes instead
+# clear caller-local variables before operating on a detached clone.
+if [[ "$MODE" != "--commit" ]]; then
+  while IFS= read -r local_git_env_var; do
+    unset "$local_git_env_var"
+  done < <(git rev-parse --local-env-vars)
+fi
+
+export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 TOOLCHAIN_BIN="${LOCAL_CI_TOOLCHAIN_BIN:-$SCRIPT_ROOT/.venv/bin}"
 if [[ -d "$TOOLCHAIN_BIN" ]]; then
