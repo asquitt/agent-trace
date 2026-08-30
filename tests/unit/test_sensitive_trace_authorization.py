@@ -11,36 +11,86 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import HTTPException
 
-from src.api.routers.traces import export_trace_json, get_trace
+from src.api.routers.traces import export_trace_json, get_trace, get_trace_reasoning
 from src.security import AuthContext
+from src.tracing.storage.postgres import PostgresStorageBackend
 
 
 class _TraceStorage:
     def __init__(self, trace: SimpleNamespace) -> None:
         self.trace = trace
         self.calls = 0
+        self.materialized_calls = 0
+        self.org_scopes: list[str | None] = []
 
-    async def get_trace(self, _trace_id: UUID) -> SimpleNamespace:
+    async def get_trace(
+        self,
+        _trace_id: UUID,
+        *,
+        org_id: str | None = None,
+    ) -> SimpleNamespace | None:
         self.calls += 1
+        self.org_scopes.append(org_id)
+        if org_id is not None and self.trace.org_id != org_id:
+            return None
+        self.materialized_calls += 1
         return self.trace
 
 
 class _NeverTraceStorage:
-    async def get_trace(self, _trace_id: UUID) -> Any:
+    async def get_trace(
+        self,
+        _trace_id: UUID,
+        *,
+        org_id: str | None = None,
+    ) -> Any:
         raise AssertionError("trace storage must not be accessed by a non-admin prompt request")
 
 
-def _auth(*, roles: set[str], org_ids: set[str]) -> AuthContext:
+class _EmptyResult:
+    def scalar_one_or_none(self) -> None:
+        return None
+
+
+class _RecordingSession:
+    def __init__(self) -> None:
+        self.statement: Any = None
+
+    async def __aenter__(self) -> _RecordingSession:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def execute(self, statement: Any) -> _EmptyResult:
+        self.statement = statement
+        return _EmptyResult()
+
+
+class _SessionFactory:
+    def __init__(self, session: _RecordingSession) -> None:
+        self.session = session
+
+    def __call__(self) -> _RecordingSession:
+        return self.session
+
+
+def _auth(
+    *,
+    roles: set[str],
+    org_ids: set[str],
+    requested_org_id: str | None = "acme",
+) -> AuthContext:
     return AuthContext(
         subject="trace-test",
         roles=frozenset(roles),
         org_ids=frozenset(org_ids),
         auth_enabled=True,
-        requested_org_id="acme",
+        requested_org_id=requested_org_id,
     )
 
 
-def _trace(*, org_id: str = "acme") -> SimpleNamespace:
+def _trace(*, org_id: str | None = "acme") -> SimpleNamespace:
     now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
     span = SimpleNamespace(
         id=uuid4(),
@@ -54,7 +104,7 @@ def _trace(*, org_id: str = "acme") -> SimpleNamespace:
         input_tokens=2,
         output_tokens=3,
         status="completed",
-        error_message=None,
+        error_message="span-sensitive-error",
         system_prompt="system-secret",
         user_prompt="user-secret",
         assistant_response="assistant-secret",
@@ -77,7 +127,7 @@ def _trace(*, org_id: str = "acme") -> SimpleNamespace:
         total_input_tokens=2,
         total_output_tokens=3,
         estimated_cost_usd=0.01,
-        error_message=None,
+        error_message="trace-sensitive-error",
         tags=[],
         trace_metadata={},
         spans=[span],
@@ -90,6 +140,21 @@ def test_trace_prompt_defaults_are_redacted() -> None:
 
     assert getattr(detail_default, "default", None) is False
     assert getattr(export_default, "default", None) is False
+
+
+@pytest.mark.asyncio
+async def test_postgres_trace_lookup_applies_org_filter_before_eager_load() -> None:
+    session = _RecordingSession()
+    storage = PostgresStorageBackend(_SessionFactory(session))  # type: ignore[arg-type]
+
+    await storage.get_trace(uuid4(), org_id="acme")
+
+    assert session.statement is not None
+    where_clause = session.statement.whereclause
+    assert where_clause is not None
+    compiled_where = where_clause.compile()
+    assert "ai_traces.org_id" in str(compiled_where)
+    assert "acme" in compiled_where.params.values()
 
 
 @pytest.mark.asyncio
@@ -129,20 +194,104 @@ async def test_tenant_admin_can_request_own_prompt_material(endpoint: Any) -> No
     )
     assert system_prompt == "system-secret"
     assert storage.calls == 1
+    assert storage.materialized_calls == 1
+    assert storage.org_scopes == ["acme"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("endpoint", [get_trace, export_trace_json])
-async def test_tenant_admin_still_requires_trace_org_access(endpoint: Any) -> None:
+async def test_foreign_trace_is_not_materialized_or_identified(endpoint: Any) -> None:
     trace = _trace(org_id="contoso")
+    storage = _TraceStorage(trace)
 
     with pytest.raises(HTTPException) as exc:
         await endpoint(
             trace.id,
-            _TraceStorage(trace),  # type: ignore[arg-type]
+            storage,  # type: ignore[arg-type]
             _auth(roles={"admin"}, org_ids={"acme"}),
             True,
         )
 
-    assert exc.value.status_code == 403
-    assert "Request org mismatch" in str(exc.value.detail)
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "Trace not found"
+    assert storage.calls == 1
+    assert storage.materialized_calls == 0
+    assert storage.org_scopes == ["acme"]
+
+
+@pytest.mark.asyncio
+async def test_foreign_reasoning_trace_is_not_materialized_or_identified() -> None:
+    trace = _trace(org_id="contoso")
+    storage = _TraceStorage(trace)
+
+    with pytest.raises(HTTPException) as exc:
+        await get_trace_reasoning(
+            trace.id,
+            storage,  # type: ignore[arg-type]
+            _auth(roles={"viewer"}, org_ids={"acme"}),
+        )
+
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "Trace not found"
+    assert storage.materialized_calls == 0
+    assert storage.org_scopes == ["acme"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", [get_trace, export_trace_json])
+async def test_default_view_hides_historical_error_payloads(endpoint: Any) -> None:
+    trace = _trace()
+    result = await endpoint(
+        trace.id,
+        _TraceStorage(trace),  # type: ignore[arg-type]
+        _auth(roles={"viewer"}, org_ids={"acme"}),
+        False,
+    )
+
+    if hasattr(result, "spans"):
+        trace_error = result.error_message
+        span_error = result.spans[0].error_message
+    else:
+        trace_error = result["trace"]["error_message"]
+        span_error = result["spans"][0]["error_message"]
+
+    assert trace_error is None
+    assert span_error is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", [get_trace, export_trace_json])
+async def test_explicit_admin_sensitive_view_can_read_error_payloads(endpoint: Any) -> None:
+    trace = _trace()
+    result = await endpoint(
+        trace.id,
+        _TraceStorage(trace),  # type: ignore[arg-type]
+        _auth(roles={"admin"}, org_ids={"acme"}),
+        True,
+    )
+
+    if hasattr(result, "spans"):
+        trace_error = result.error_message
+        span_error = result.spans[0].error_message
+    else:
+        trace_error = result["trace"]["error_message"]
+        span_error = result["spans"][0]["error_message"]
+
+    assert trace_error == "trace-sensitive-error"
+    assert span_error == "span-sensitive-error"
+
+
+@pytest.mark.asyncio
+async def test_global_admin_may_use_unscoped_lookup() -> None:
+    trace = _trace(org_id=None)
+    storage = _TraceStorage(trace)
+
+    result = await get_trace(
+        trace.id,
+        storage,  # type: ignore[arg-type]
+        _auth(roles={"admin"}, org_ids={"*"}, requested_org_id=None),
+        False,
+    )
+
+    assert result.id == str(trace.id)
+    assert storage.org_scopes == [None]

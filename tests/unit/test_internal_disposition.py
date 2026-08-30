@@ -345,6 +345,13 @@ def test_repository_surfaces_are_internal_and_manual_only() -> None:
     assert "bounded repository maintenance may be explicitly authorized" in normalized_disposition
     assert "historical database contains no sensitive data" in normalized_disposition
     assert "historical stores contain no sensitive data" in normalized_readme
+    for sensitive_trace_clause in (
+        "deterministic safe error codes and exception types",
+        "organization predicate before prompt-bearing spans are loaded",
+        "sensitive error details",
+    ):
+        assert sensitive_trace_clause in normalized_disposition
+        assert sensitive_trace_clause in normalized_readme
     for rollback_clause in (
         "remove or revoke provider credentials",
         "block provider egress",

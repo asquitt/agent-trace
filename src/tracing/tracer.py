@@ -299,23 +299,31 @@ class Tracer:
 
             import traceback
 
+            error_type = type(e).__name__
+            if self.capture_prompts is True:
+                error_message = str(e)
+                error_traceback = traceback.format_exc()
+            else:
+                error_message = f"trace_execution_failed:{error_type}"
+                error_traceback = None
+
             await self.storage.update_trace(
                 trace_id,
                 {
                     "status": TraceStatus.FAILED.value,
                     "completed_at": completed_at.isoformat(),
                     "duration_ms": duration_ms,
-                    "error_message": str(e),
-                    "error_type": type(e).__name__,
-                    "error_traceback": traceback.format_exc(),
+                    "error_message": error_message,
+                    "error_type": error_type,
+                    "error_traceback": error_traceback,
                 },
             )
 
             self.logger.error(
                 "trace_failed",
                 trace_id=str(trace_id),
-                error=str(e),
-                error_type=type(e).__name__,
+                error=error_message,
+                error_type=error_type,
             )
             raise
 
@@ -447,14 +455,28 @@ class Tracer:
             completed_at = datetime.now(timezone.utc)
             duration_ms = int((completed_at - started_at).total_seconds() * 1000)
 
+            error_type = type(e).__name__
+            error_message = (
+                str(e)
+                if self.capture_prompts is True
+                else f"span_execution_failed:{error_type}"
+            )
+
             await self.storage.update_span(
                 span_id,
                 {
                     "status": SpanStatus.FAILED.value,
                     "completed_at": completed_at.isoformat(),
                     "duration_ms": duration_ms,
-                    "error_message": str(e),
+                    "error_message": error_message,
                 },
+            )
+            self.logger.error(
+                "span_failed",
+                trace_id=str(ctx.trace_id),
+                span_id=str(span_id),
+                error=error_message,
+                error_type=error_type,
             )
             raise
 

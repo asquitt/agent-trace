@@ -10,6 +10,7 @@ from typing import Any, Callable
 from uuid import UUID, uuid4
 
 import pytest
+from structlog.testing import capture_logs
 
 import src.dependencies as dependencies_module
 import src.tracing.providers.anthropic as anthropic_provider_module
@@ -24,6 +25,7 @@ from src.tracing.types import ReasoningData, SpanData, SpanType, TraceData, Trac
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SECRET_PROMPT = "SECRET-customer-prompt-do-not-retain"
+SECRET_EXCEPTION_MARKER = "SECRET-provider-error-payload-do-not-retain"
 INVALID_BOOLEAN_VALUES = ["false", "true", 0, 1, object()]
 INVALID_BOOLEAN_IDS = ["false-string", "true-string", "zero", "one", "object"]
 
@@ -283,6 +285,53 @@ async def test_mutated_capture_setting_never_persists_tracer_prompts_or_response
         sort_keys=True,
     )
     assert SECRET_PROMPT not in persisted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_scope", ["trace", "span"])
+async def test_capture_disabled_redacts_exception_payloads_from_storage_and_logs(
+    failure_scope: str,
+) -> None:
+    storage = RecordingStorage()
+    tracer = Tracer(storage=storage, capture_prompts=False)
+
+    with capture_logs() as logs:
+        with pytest.raises(RuntimeError, match=SECRET_EXCEPTION_MARKER):
+            if failure_scope == "trace":
+                async with tracer.start_trace(TraceType.RANKING):
+                    raise RuntimeError(SECRET_EXCEPTION_MARKER)
+            else:
+                token = set_current_context(
+                    TraceContext(trace_id=uuid4(), correlation_id=uuid4())
+                )
+                try:
+                    async with tracer.start_span(SpanType.LLM_CALL, "provider_failure"):
+                        raise RuntimeError(SECRET_EXCEPTION_MARKER)
+                finally:
+                    reset_context(token)
+
+    persisted = json.dumps(
+        {
+            "trace_updates": storage.trace_updates,
+            "span_updates": storage.span_updates,
+        },
+        sort_keys=True,
+    )
+    captured_logs = json.dumps(logs, sort_keys=True)
+
+    assert SECRET_EXCEPTION_MARKER not in persisted
+    assert SECRET_EXCEPTION_MARKER not in captured_logs
+    assert "Traceback (most recent call last)" not in persisted
+    assert "Traceback (most recent call last)" not in captured_logs
+
+    expected_code = f"{failure_scope}_execution_failed:RuntimeError"
+    updates = storage.trace_updates if failure_scope == "trace" else storage.span_updates
+    assert updates[-1]["error_message"] == expected_code
+    if failure_scope == "trace":
+        assert updates[-1]["error_type"] == "RuntimeError"
+        assert updates[-1]["error_traceback"] is None
+    assert logs[-1]["error"] == expected_code
+    assert logs[-1]["error_type"] == "RuntimeError"
 
 
 @pytest.mark.asyncio

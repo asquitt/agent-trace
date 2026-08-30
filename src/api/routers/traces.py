@@ -337,7 +337,10 @@ async def get_trace(
     trace_id: UUID,
     storage: StorageDep,
     auth: AuthDep,
-    include_prompts: bool = Query(False, description="Include full prompts/responses"),
+    include_prompts: bool = Query(
+        False,
+        description="Include full prompts/responses and sensitive error details",
+    ),
 ) -> TraceResponse:
     """Get a single trace with all spans.
 
@@ -347,16 +350,10 @@ async def get_trace(
     _require_trace_viewer(auth)
     if include_prompts:
         _require_sensitive_trace_access(auth)
-    trace = await storage.get_trace(trace_id)
+    resolved_org_id = _resolve_trace_org_scope(auth, None)
+    trace = await storage.get_trace(trace_id, org_id=resolved_org_id)
     if not trace:
         raise HTTPException(status_code=404, detail="Trace not found")
-    if trace.org_id:
-        require_org_access(auth, trace.org_id)
-    elif not auth.is_global_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Trace has no org scope and requires global admin access",
-        )
 
     spans: list[SpanResponse] = []
     for span in trace.spans or []:
@@ -372,7 +369,7 @@ async def get_trace(
             input_tokens=span.input_tokens,
             output_tokens=span.output_tokens,
             status=span.status.value if hasattr(span.status, "value") else str(span.status),
-            error_message=span.error_message,
+            error_message=span.error_message if include_prompts else None,
             reasoning_steps=[
                 ReasoningStepResponse(
                     id=str(r.id),
@@ -414,7 +411,7 @@ async def get_trace(
         total_input_tokens=trace.total_input_tokens,
         total_output_tokens=trace.total_output_tokens,
         estimated_cost_usd=trace.estimated_cost_usd,
-        error_message=trace.error_message,
+        error_message=trace.error_message if include_prompts else None,
         tags=trace.tags or [],
         metadata=trace.trace_metadata or {},
         spans=spans,
@@ -433,16 +430,10 @@ async def get_trace_reasoning(
     useful for understanding the decision chain.
     """
     _require_trace_viewer(auth)
-    trace = await storage.get_trace(trace_id)
+    resolved_org_id = _resolve_trace_org_scope(auth, None)
+    trace = await storage.get_trace(trace_id, org_id=resolved_org_id)
     if not trace:
         raise HTTPException(status_code=404, detail="Trace not found")
-    if trace.org_id:
-        require_org_access(auth, trace.org_id)
-    elif not auth.is_global_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Trace has no org scope and requires global admin access",
-        )
 
     reasoning_steps: list[ReasoningStepResponse] = []
     for span in trace.spans or []:
@@ -509,7 +500,10 @@ async def export_trace_json(
     trace_id: UUID,
     storage: StorageDep,
     auth: AuthDep,
-    include_prompts: bool = Query(False, description="Include full prompts/responses"),
+    include_prompts: bool = Query(
+        False,
+        description="Include full prompts/responses and sensitive error details",
+    ),
 ) -> dict[str, Any]:
     """Export a trace as JSON for external analysis.
 
@@ -518,16 +512,10 @@ async def export_trace_json(
     _require_trace_viewer(auth)
     if include_prompts:
         _require_sensitive_trace_access(auth)
-    trace = await storage.get_trace(trace_id)
+    resolved_org_id = _resolve_trace_org_scope(auth, None)
+    trace = await storage.get_trace(trace_id, org_id=resolved_org_id)
     if not trace:
         raise HTTPException(status_code=404, detail="Trace not found")
-    if trace.org_id:
-        require_org_access(auth, trace.org_id)
-    elif not auth.is_global_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Trace has no org scope and requires global admin access",
-        )
 
     # Build complete export
     export_data: dict[str, Any] = {
@@ -544,7 +532,7 @@ async def export_trace_json(
             "total_input_tokens": trace.total_input_tokens,
             "total_output_tokens": trace.total_output_tokens,
             "estimated_cost_usd": trace.estimated_cost_usd,
-            "error_message": trace.error_message,
+            "error_message": trace.error_message if include_prompts else None,
             "tags": trace.tags or [],
             "metadata": trace.trace_metadata or {},
         },
@@ -564,7 +552,7 @@ async def export_trace_json(
             "input_tokens": span.input_tokens,
             "output_tokens": span.output_tokens,
             "status": span.status.value if hasattr(span.status, "value") else str(span.status),
-            "error_message": span.error_message,
+            "error_message": span.error_message if include_prompts else None,
             "reasoning_steps": [
                 {
                     "step_number": r.step_number,

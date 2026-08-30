@@ -63,10 +63,12 @@ requires the separate pre-execution revocation contract documented in `docs/DISP
 
 `PROVIDER_EXECUTION_ENABLED=false` prevents the traced OpenAI and Anthropic wrappers from
 constructing SDK clients or issuing requests. `TRACE_CAPTURE_PROMPTS=false` omits full prompt,
-response, and plaintext preview capture from new traced provider calls. Prompt-bearing trace detail
-and export responses require an administrator and explicit `include_prompts=true`. These controls
-do not prove that historical stores contain no sensitive data; an adopting product must audit and
-redact its own persisted records under its retention policy.
+response, plaintext preview, raw exception text, and tracebacks from new traced provider calls;
+failures retain deterministic safe error codes and exception types. Tenant-scoped detail, reasoning, and
+export requests apply the caller's organization predicate before prompt-bearing spans are loaded.
+Prompt, response, and sensitive error details require an administrator and explicit
+`include_prompts=true`. These controls do not prove that historical stores contain no sensitive
+data; an adopting product must audit and redact its own persisted records under its retention policy.
 
 Rollback across the provider-execution gate is security-sensitive. Do not revert the gate while
 provider credentials or provider-network egress remain available. Before rollback, remove or revoke

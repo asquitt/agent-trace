@@ -61,11 +61,14 @@ when disabling governance. With the repository default disabled, no control leas
 
 `PROVIDER_EXECUTION_ENABLED=false` blocks traced OpenAI and Anthropic SDK construction and requests,
 including direct no-context paths. `TRACE_CAPTURE_PROMPTS=false` omits full prompt, response, and
-plaintext preview capture from new traced provider calls. Prompt-bearing trace detail and export
-responses additionally require administrator access and explicit `include_prompts=true`. These are
-forward-looking code boundaries, not proof that a historical database contains no sensitive data.
-No deployment or product-owned store was identified for cleanup here; each adopter must audit,
-redact, retain, or delete its own existing records under an approved sensitive-data contract.
+plaintext preview capture from new traced provider calls, and records deterministic safe error codes
+and exception types instead of raw exception text or tracebacks. Tenant-scoped detail, reasoning,
+and export requests apply the caller's organization predicate before prompt-bearing spans are
+loaded. Prompt, response, and sensitive error details additionally require administrator access and
+explicit `include_prompts=true`. These are forward-looking code boundaries, not proof that a
+historical database contains no sensitive data. No deployment or product-owned store was identified
+for cleanup here; each adopter must audit, redact, retain, or delete its own existing records under
+an approved sensitive-data contract.
 
 The provider-execution gate must not be independently reverted while provider credentials or
 provider-network egress remain available. Before rollback across this boundary, remove or revoke
