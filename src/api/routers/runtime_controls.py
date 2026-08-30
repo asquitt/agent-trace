@@ -106,9 +106,17 @@ async def acknowledge_control(
     control_id: UUID,
     body: RuntimeControlAckRequest,
     storage: StorageDep,
+    settings: SettingsDep,
     auth: AuthDep,
 ) -> RuntimeControlAckResponse:
     _require_runtime_auth(auth, body.org_id)
+    try:
+        require_runtime_governance(settings)
+    except RuntimeGovernanceDisabledError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     async with storage.session_factory() as db:
         try:
             control, idempotent_replay = await acknowledge_runtime_control(
@@ -122,6 +130,7 @@ async def acknowledge_control(
                 details=body.details,
                 actor_subject=auth.subject,
                 actor_roles=sorted(auth.roles),
+                runtime_governance_enabled=settings.runtime_governance_enabled,
             )
             await db.commit()
         except (RuntimeControlNotFoundError, RuntimeControlConflictError) as exc:

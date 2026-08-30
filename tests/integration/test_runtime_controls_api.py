@@ -373,6 +373,35 @@ def test_runtime_control_tenant_lease_ack_and_shutdown_projection(
 
     client.portal.call(_assert_token_is_hashed)
 
+    settings.runtime_governance_enabled = False
+    frozen_ack = client.post(
+        f"/api/v1/runtime-controls/{throttle_id}/ack",
+        json={
+            "org_id": "acme",
+            "runtime_instance_id": "instance-throttle",
+            "lease_token": lease_token,
+            "acknowledgement_id": "ack-while-frozen",
+            "outcome": "applied",
+            "details": {"effective_rate": 0.25},
+        },
+        headers=headers,
+    )
+    assert frozen_ack.status_code == 409
+    assert frozen_ack.json()["detail"] == "runtime_governance_disabled"
+
+    async def _assert_freeze_did_not_project_application() -> None:
+        async with async_session_factory() as db:
+            control = await db.get(RuntimeControlRequest, throttle_id)
+            session = await db.get(AgentSession, throttle_session_id)
+            assert control is not None
+            assert control.status == "leased"
+            assert control.acknowledgement_id is None
+            assert session is not None
+            assert session.status == SessionStatus.ACTIVE
+
+    client.portal.call(_assert_freeze_did_not_project_application)
+    settings.runtime_governance_enabled = True
+
     wrong_token = client.post(
         f"/api/v1/runtime-controls/{throttle_id}/ack",
         json={

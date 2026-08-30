@@ -27,14 +27,19 @@ from src.api.routers.observability import (
     run_operations_cycle,
 )
 from src.api.routers.runtime_controls import (
+    RuntimeControlAckRequest,
     RuntimeControlClaimRequest,
+    acknowledge_control,
     claim_controls,
 )
 from src.config import Settings
 from src.security import AuthContext
 from src.services.notification_outbox import NotificationOutboxService
 from src.services.observability_runtime import evaluate_budget_policies
-from src.services.runtime_controls import claim_runtime_controls
+from src.services.runtime_controls import (
+    acknowledge_runtime_control,
+    claim_runtime_controls,
+)
 from src.services.runtime_governance import RuntimeGovernanceDisabledError
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -75,7 +80,7 @@ async def test_frozen_outbox_rejects_before_accessing_storage() -> None:
 
 
 @pytest.mark.asyncio
-async def test_frozen_runtime_control_claim_rejects_before_storage() -> None:
+async def test_frozen_runtime_control_delivery_rejects_before_storage() -> None:
     class NeverStorage:
         @property
         def session_factory(self) -> Any:
@@ -107,6 +112,25 @@ async def test_frozen_runtime_control_claim_rejects_before_storage() -> None:
     assert exc.value.status_code == 409
     assert exc.value.detail == "runtime_governance_disabled"
 
+    acknowledgement = RuntimeControlAckRequest(
+        org_id="acme",
+        runtime_instance_id="runtime-1",
+        lease_token="x" * 43,
+        acknowledgement_id="ack-frozen",
+        outcome="applied",
+    )
+    with pytest.raises(HTTPException) as exc:
+        await acknowledge_control(
+            uuid4(),
+            acknowledgement,
+            cast(Any, NeverStorage()),
+            Settings(_env_file=None, runtime_governance_enabled=False),
+            auth,
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "runtime_governance_disabled"
+
 
 @pytest.mark.asyncio
 async def test_direct_services_reject_governance_effects_before_storage() -> None:
@@ -127,6 +151,20 @@ async def test_direct_services_reject_governance_effects_before_storage() -> Non
             lease_seconds=60,
             max_delivery_attempts=3,
             max_items=10,
+        )
+
+    with pytest.raises(RuntimeGovernanceDisabledError, match="runtime_governance_disabled"):
+        await acknowledge_runtime_control(
+            db,
+            control_id=uuid4(),
+            org_id="acme",
+            runtime_instance_id="runtime-1",
+            lease_token="x" * 43,
+            acknowledgement_id="ack-frozen",
+            outcome="applied",
+            details={},
+            actor_subject="runtime",
+            actor_roles=["operator"],
         )
 
 

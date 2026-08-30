@@ -384,9 +384,11 @@ async def acknowledge_runtime_control(
     details: dict[str, Any],
     actor_subject: str,
     actor_roles: list[str],
+    runtime_governance_enabled: bool = False,
     now: datetime | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Persist an exact-owner terminal acknowledgement atomically."""
+    require_runtime_governance_enabled(runtime_governance_enabled)
     acknowledged_at = now or utc_now_naive()
     payload_hash = _canonical_payload_hash(outcome=outcome, details=details)
     query = (

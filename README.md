@@ -57,6 +57,10 @@ only after defining its telemetry schema, sensitive-data policy, retention, fail
 ownership, and acceptance tests. The first adoption belongs in the product's canonical layer; a
 shared package is not justified until the second-consumer gate in `docs/DISPOSITION.md` passes.
 
+The runtime-governance setting is a cold fail-closed boundary, not a distributed emergency stop:
+it cannot revoke a control already delivered to an external runtime. Runtime-control adoption
+requires the separate pre-execution revocation contract documented in `docs/DISPOSITION.md`.
+
 The package metadata is private and is not intended for publication. Existing dependencies and
 build requirements are retained because local repository gates still consume them; that retention
 does not make the package API stable or supported.

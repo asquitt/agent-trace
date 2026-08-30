@@ -49,6 +49,12 @@ The first consumer implements the needed behavior in the product's canonical lay
 adapted, but the product owns authentication, tenancy, data minimization, persistence, operations,
 rollback, and evidence.
 
+`RUNTIME_GOVERNANCE_ENABLED=false` blocks new control leases and acknowledgements in this API. It
+cannot recall authority already delivered to an external runtime, so it is not an emergency-stop
+mechanism. A future adopter must add revocation-aware authorization immediately before execution,
+define in-flight cancellation behavior, and stop the runtime consumer or wait for leases to expire
+when disabling governance. With the repository default disabled, no control lease is issued.
+
 ## Second-Consumer Adoption Gate
 
 A reusable shared component is permitted only after two independent active products demonstrate
@@ -108,6 +114,15 @@ Existing tests cover useful deterministic behavior but do not establish complete
 aggregation, cancellation and process-loss recovery, every failure transition, live Anthropic or
 OpenAI compatibility, provider streaming/tool-call variants, prompt redaction, or product-owned
 end-to-end persistence. Provider mocks and local integration tests remain development evidence.
+
+### In-flight control revocation
+
+The API rejects new runtime-control claims and acknowledgements while governance is disabled, but
+the repository does not contain a runtime consumer or a revocation-aware pre-execution handshake.
+A runtime that already received a leased instruction may act before the lease expires even though
+the API will reject its acknowledgement and will not project the action as applied. Runtime-control
+delivery therefore remains deferred and must not be adopted as an emergency-stop or revocation
+contract.
 
 ## No Standalone Roadmap
 
