@@ -12,6 +12,7 @@ from anthropic import AsyncAnthropic
 from ..context import get_current_context
 from ..tracer import Tracer
 from ..types import SpanType
+from .governance import require_provider_execution, validate_execution_enabled
 
 
 class TracedAnthropicClient:
@@ -21,7 +22,11 @@ class TracedAnthropicClient:
     API call, capturing prompts, responses, and token usage.
 
     Example:
-        client = TracedAnthropicClient(tracer, api_key="sk-...")
+        client = TracedAnthropicClient(
+            tracer,
+            api_key="sk-...",
+            execution_enabled=True,
+        )
 
         async with tracer.start_trace(TraceType.RANKING, idea_id=123):
             response = await client.create_message(
@@ -47,6 +52,7 @@ class TracedAnthropicClient:
         tracer: Tracer,
         client: Optional[AsyncAnthropic] = None,
         api_key: Optional[str] = None,
+        execution_enabled: bool = False,
     ):
         """Initialize the traced Anthropic client.
 
@@ -54,9 +60,20 @@ class TracedAnthropicClient:
             tracer: The Tracer instance to use for tracing
             client: Optional existing AsyncAnthropic client
             api_key: Optional API key (used if client not provided)
+            execution_enabled: Explicit authorization for external provider calls
         """
         self.tracer = tracer
-        self.client = client or AsyncAnthropic(api_key=api_key)
+        self.execution_enabled = validate_execution_enabled(execution_enabled)
+        self.client: Optional[AsyncAnthropic] = None
+        if self.execution_enabled is True:
+            self.client = client if client is not None else AsyncAnthropic(api_key=api_key)
+
+    def _require_client(self) -> AsyncAnthropic:
+        """Return the client only when external provider execution is authorized."""
+        require_provider_execution(self.execution_enabled, provider="Anthropic")
+        if self.client is None:
+            raise RuntimeError("Anthropic client is unavailable")
+        return self.client
 
     async def create_message(
         self,
@@ -93,8 +110,9 @@ class TracedAnthropicClient:
             Anthropic Message response
 
         Raises:
-            RuntimeError: If no active trace context exists
+            ProviderExecutionDisabledError: If provider execution is disabled
         """
+        self._require_client()
         ctx = get_current_context()
         if not ctx:
             # No trace context - just make the call without tracing
@@ -182,6 +200,7 @@ class TracedAnthropicClient:
         **kwargs: Any,
     ) -> anthropic.types.Message:
         """Make the raw API call without tracing."""
+        client = self._require_client()
         request_kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
@@ -197,7 +216,7 @@ class TracedAnthropicClient:
             request_kwargs["top_k"] = top_k
         request_kwargs.update(kwargs)
 
-        create = cast(Any, self.client.messages.create)
+        create = cast(Any, client.messages.create)
         return await create(**request_kwargs)
 
     def _extract_user_prompt(self, messages: list[dict[str, Any]]) -> str:

@@ -11,6 +11,7 @@ from openai import AsyncOpenAI
 from ..context import get_current_context
 from ..tracer import Tracer
 from ..types import SpanType
+from .governance import require_provider_execution, validate_execution_enabled
 
 
 class TracedOpenAIClient:
@@ -20,7 +21,11 @@ class TracedOpenAIClient:
     API call, capturing inputs and token usage.
 
     Example:
-        client = TracedOpenAIClient(tracer, api_key="sk-...")
+        client = TracedOpenAIClient(
+            tracer,
+            api_key="sk-...",
+            execution_enabled=True,
+        )
 
         async with tracer.start_trace(TraceType.EMBEDDING, idea_id=123):
             embedding = await client.create_embedding(
@@ -42,6 +47,7 @@ class TracedOpenAIClient:
         tracer: Tracer,
         client: Optional[AsyncOpenAI] = None,
         api_key: Optional[str] = None,
+        execution_enabled: bool = False,
     ):
         """Initialize the traced OpenAI client.
 
@@ -49,9 +55,20 @@ class TracedOpenAIClient:
             tracer: The Tracer instance to use for tracing
             client: Optional existing AsyncOpenAI client
             api_key: Optional API key (used if client not provided)
+            execution_enabled: Explicit authorization for external provider calls
         """
         self.tracer = tracer
-        self.client = client or AsyncOpenAI(api_key=api_key)
+        self.execution_enabled = validate_execution_enabled(execution_enabled)
+        self.client: Optional[AsyncOpenAI] = None
+        if self.execution_enabled is True:
+            self.client = client if client is not None else AsyncOpenAI(api_key=api_key)
+
+    def _require_client(self) -> AsyncOpenAI:
+        """Return the client only when external provider execution is authorized."""
+        require_provider_execution(self.execution_enabled, provider="OpenAI")
+        if self.client is None:
+            raise RuntimeError("OpenAI client is unavailable")
+        return self.client
 
     async def create_embedding(
         self,
@@ -75,8 +92,9 @@ class TracedOpenAIClient:
             List of floats representing the embedding vector
 
         Raises:
-            RuntimeError: If no active trace context exists
+            ProviderExecutionDisabledError: If provider execution is disabled
         """
+        self._require_client()
         ctx = get_current_context()
         if not ctx:
             # No trace context - just make the call without tracing
@@ -87,10 +105,9 @@ class TracedOpenAIClient:
             )
 
         # Build input data for tracing
-        input_data = {
-            "text_length": len(text),
-            "text_preview": text[:200] + "..." if len(text) > 200 else text,
-        }
+        input_data: dict[str, int | str] = {"text_length": len(text)}
+        if self.tracer.capture_prompts is True:
+            input_data["text_preview"] = text[:200] + "..." if len(text) > 200 else text
         if dimensions:
             input_data["dimensions"] = dimensions
 
@@ -102,8 +119,9 @@ class TracedOpenAIClient:
             input_data=input_data,
             metadata=metadata,
         ) as span:
-            # Make the actual API call
-            response = await self.client.embeddings.create(
+            # start_span persists before yielding; guard that boundary and dispatch separately.
+            client = self._require_client()
+            response = await client.embeddings.create(
                 input=text,
                 model=model,
                 dimensions=dimensions if dimensions else None,  # type: ignore[arg-type]
@@ -148,6 +166,7 @@ class TracedOpenAIClient:
         Returns:
             List of embedding vectors (one per input text)
         """
+        self._require_client()
         ctx = get_current_context()
         if not ctx:
             return await self._raw_create_embeddings_batch(
@@ -171,7 +190,9 @@ class TracedOpenAIClient:
             input_data=input_data,
             metadata=metadata,
         ) as span:
-            response = await self.client.embeddings.create(
+            # start_span persists before yielding; guard that boundary and dispatch separately.
+            client = self._require_client()
+            response = await client.embeddings.create(
                 input=texts,
                 model=model,
                 dimensions=dimensions if dimensions else None,  # type: ignore[arg-type]
@@ -202,7 +223,8 @@ class TracedOpenAIClient:
         dimensions: Optional[int],
     ) -> list[float]:
         """Make the raw API call without tracing."""
-        response = await self.client.embeddings.create(
+        client = self._require_client()
+        response = await client.embeddings.create(
             input=text,
             model=model,
             dimensions=dimensions if dimensions else None,  # type: ignore[arg-type]
@@ -216,7 +238,8 @@ class TracedOpenAIClient:
         dimensions: Optional[int],
     ) -> list[list[float]]:
         """Make the raw batch API call without tracing."""
-        response = await self.client.embeddings.create(
+        client = self._require_client()
+        response = await client.embeddings.create(
             input=texts,
             model=model,
             dimensions=dimensions if dimensions else None,  # type: ignore[arg-type]

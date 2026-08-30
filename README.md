@@ -61,6 +61,24 @@ The runtime-governance setting is a cold fail-closed boundary, not a distributed
 it cannot revoke a control already delivered to an external runtime. Runtime-control adoption
 requires the separate pre-execution revocation contract documented in `docs/DISPOSITION.md`.
 
+`PROVIDER_EXECUTION_ENABLED=false` prevents the traced OpenAI and Anthropic wrappers from
+constructing SDK clients or issuing requests. `TRACE_CAPTURE_PROMPTS=false` omits full prompt,
+response, and plaintext preview capture from new traced provider calls. Prompt-bearing trace detail
+and export responses require an administrator and explicit `include_prompts=true`. These controls
+do not prove that historical stores contain no sensitive data; an adopting product must audit and
+redact its own persisted records under its retention policy.
+
+Rollback across the provider-execution gate is security-sensitive. Do not revert the gate while
+provider credentials or provider-network egress remain available. Before rollback, remove or revoke
+provider credentials, block provider egress, stop or drain existing processes and in-flight calls,
+then verify that no provider request occurs under the rollback candidate.
+`PROVIDER_EXECUTION_ENABLED=false` is insufficient for an older revision that does not implement
+the gate.
+
+The container entrypoint defaults `MIGRATE_ON_START=false`, rejects ambiguous Boolean flag values,
+and performs no migration unless explicitly enabled. The local Compose reference opts its isolated
+database into migrations; that does not authorize mutation of a product or shared database.
+
 The package metadata is private and is not intended for publication. Existing dependencies and
 build requirements are retained because local repository gates still consume them; that retention
 does not make the package API stable or supported.
@@ -81,5 +99,6 @@ require their own explicit environment and prove only the boundary they actually
 ## Investment Policy
 
 There is no standalone roadmap. Do not extend the generic console, control plane, deployment
-topology, scheduler, policy engine, or observability platform without a concrete active-product
-need and the adoption evidence required by `docs/DISPOSITION.md`.
+topology, scheduler, policy engine, or observability platform in this repository. A named active
+product implements the smallest required capability in its own canonical layer; shared extraction
+remains prohibited until the second-consumer gate in `docs/DISPOSITION.md` passes.

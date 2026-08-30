@@ -139,6 +139,10 @@ def _require_trace_viewer(auth: AuthContext) -> None:
     require_roles(auth, "viewer", "operator", "admin")
 
 
+def _require_sensitive_trace_access(auth: AuthContext) -> None:
+    require_roles(auth, "admin")
+
+
 def _resolve_trace_org_scope(auth: AuthContext, org_id: Optional[str]) -> Optional[str]:
     if auth.requested_org_id:
         if org_id and org_id != auth.requested_org_id:
@@ -341,6 +345,8 @@ async def get_trace(
     This is useful for debugging but may return large responses.
     """
     _require_trace_viewer(auth)
+    if include_prompts:
+        _require_sensitive_trace_access(auth)
     trace = await storage.get_trace(trace_id)
     if not trace:
         raise HTTPException(status_code=404, detail="Trace not found")
@@ -503,13 +509,15 @@ async def export_trace_json(
     trace_id: UUID,
     storage: StorageDep,
     auth: AuthDep,
-    include_prompts: bool = Query(True, description="Include full prompts/responses"),
+    include_prompts: bool = Query(False, description="Include full prompts/responses"),
 ) -> dict[str, Any]:
     """Export a trace as JSON for external analysis.
 
     Returns the complete trace data including all spans and reasoning steps.
     """
     _require_trace_viewer(auth)
+    if include_prompts:
+        _require_sensitive_trace_access(auth)
     trace = await storage.get_trace(trace_id)
     if not trace:
         raise HTTPException(status_code=404, detail="Trace not found")

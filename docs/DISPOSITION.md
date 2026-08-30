@@ -33,8 +33,12 @@ unverified rather than being inferred from local checks.
 
 ## Safe Default Boundary
 
-The safe default is read-only evaluation of source and tests. Unless a product adoption is
-explicitly authorized:
+The safe default is read-only evaluation of source and tests. Bounded repository maintenance may
+be explicitly authorized without a product adoption only for governance, dependency/security, or
+risk-reducing corrections that add no capability, compatibility promise, deployment path, or
+product-adoption behavior. Isolated proof for that maintenance does not authorize deployment,
+provider execution, adoption, or capability expansion. Unless one of those maintenance corrections
+or a product-local adoption is explicitly authorized:
 
 - Do not publish the Python package or describe its interfaces as stable.
 - Do not deploy the API, console, scheduler, runtime controls, or deployment templates.
@@ -54,6 +58,25 @@ cannot recall authority already delivered to an external runtime, so it is not a
 mechanism. A future adopter must add revocation-aware authorization immediately before execution,
 define in-flight cancellation behavior, and stop the runtime consumer or wait for leases to expire
 when disabling governance. With the repository default disabled, no control lease is issued.
+
+`PROVIDER_EXECUTION_ENABLED=false` blocks traced OpenAI and Anthropic SDK construction and requests,
+including direct no-context paths. `TRACE_CAPTURE_PROMPTS=false` omits full prompt, response, and
+plaintext preview capture from new traced provider calls. Prompt-bearing trace detail and export
+responses additionally require administrator access and explicit `include_prompts=true`. These are
+forward-looking code boundaries, not proof that a historical database contains no sensitive data.
+No deployment or product-owned store was identified for cleanup here; each adopter must audit,
+redact, retain, or delete its own existing records under an approved sensitive-data contract.
+
+The provider-execution gate must not be independently reverted while provider credentials or
+provider-network egress remain available. Before rollback across this boundary, remove or revoke
+provider credentials, block provider egress, stop or drain existing processes and in-flight calls,
+and verify that no provider request occurs under the rollback candidate. Setting
+`PROVIDER_EXECUTION_ENABLED=false` is insufficient for an older revision that does not implement
+the gate.
+
+The container entrypoint defaults `MIGRATE_ON_START=false` and fails closed on ambiguous Boolean
+flag values. A repository-local Compose environment may explicitly opt its isolated database into
+migrations, but no default or example authorizes mutation of a product or shared database.
 
 ## Second-Consumer Adoption Gate
 
@@ -127,6 +150,8 @@ contract.
 ## No Standalone Roadmap
 
 There is no roadmap for a hosted AI Trace service, operator console, fleet control plane, runtime
-governance platform, public package, standalone deployment, or customer acquisition. Work may be
-opened only from an active product requirement and must be evaluated against the safe default and
-second-consumer gate above.
+governance platform, public package, standalone deployment, or customer acquisition. Capability or
+adoption work may be opened only from a named active-product requirement and must remain in that
+product's canonical layer unless the second-consumer gate passes. This repository may otherwise
+receive only explicitly authorized governance, dependency/security, or risk-reducing maintenance
+that adds no capability, compatibility promise, deployment path, or product-adoption behavior.

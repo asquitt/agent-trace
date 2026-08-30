@@ -8,6 +8,16 @@ What behavior changes, who or what is affected, and which product or operational
 - Explicitly excluded:
 - Unrelated work preserved:
 
+## Disposition and ownership
+
+- Change class: repository governance/dependency/security/risk-reducing maintenance OR named product-local adoption OR shared extraction
+- Maintenance proof that this adds no capability, compatibility promise, deployment path, or product-adoption behavior (or not applicable):
+- Named active product and accountable owner (required for every capability expansion or adoption; otherwise `none - bounded maintenance only`):
+- Product-local implementation location and acceptance criteria (or not applicable):
+- Operator or customer outcome and evidence (or not applicable):
+- Shared extraction requested: yes / no
+- If yes, evidence for all eight second-consumer gate items in `docs/DISPOSITION.md`:
+
 ## Exact candidate
 
 - Default branch and base SHA:
@@ -38,10 +48,15 @@ What behavior changes, who or what is affected, and which product or operational
 - Security, tenant, provider, or persistence impact:
 - Observability signal and expected steady state:
 - Rollback target and procedure:
+- Provider-gate rollback (or not applicable; older revisions may ignore `PROVIDER_EXECUTION_ENABLED=false`): credentials removed/revoked, egress blocked, processes and in-flight calls drained, and zero provider requests verified against the rollback candidate
 - Fixture, task, provider, and external-state cleanup:
 
 ## AI Trace acceptance
 
+- [ ] The change preserves `docs/DISPOSITION.md`: no standalone product, hosted service, public package, deployment promotion, or generic control-plane work.
+- [ ] A maintenance change is limited to governance, dependency/security, or risk reduction and adds no capability, compatibility promise, deployment path, or product-adoption behavior.
+- [ ] A first adoption stays product-local and names its active product, owner, acceptance criteria, and outcome.
+- [ ] Shared extraction occurs only after two independent active products satisfy every second-consumer gate item; otherwise no shared abstraction is added.
 - [ ] Tenant scope, active leader versus standby/contending/error truth, advisory locks, and stale-session behavior are proven where applicable.
 - [ ] Monotonic watermarks, approval-gated shutdown, dependency/image identity, and the development-only dashboard boundary remain intact.
 

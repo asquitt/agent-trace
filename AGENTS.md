@@ -4,6 +4,15 @@
 
 These rules govern implementation, diagnosis, review, release, and handoff. More specific project invariants below remain binding.
 
+## Binding Product Disposition
+
+- `docs/DISPOSITION.md` governs this repository. AI Trace is a private internal implementation inventory, not a standalone product, hosted service, public package, or generic control plane.
+- The default activity is read-only source and test evaluation. Repository maintenance is limited to governance, dependency/security, or risk-reducing corrections that add no capability, compatibility promise, deployment path, or product-adoption behavior.
+- Every capability expansion or adoption change must identify a named active product, accountable owner, product-local acceptance criteria, and operator or customer outcome. Missing ownership or evidence is a `HOLD`, not permission to generalize the repository.
+- The first consumer implements the needed behavior in that product's canonical layer and owns authentication, tenancy, data minimization, persistence, operations, rollback, and evidence.
+- Shared extraction is prohibited until two independent active products satisfy every item in the second-consumer gate in `docs/DISPOSITION.md`. Similar code or one consumer is insufficient.
+- Do not publish or deploy this repository, enable provider or outbound side effects, or run migrations against a product or shared database without a new explicit owner decision that satisfies the disposition.
+
 ### Scope and planning
 
 - State assumptions, scope, and measurable success criteria before multi-step work.
@@ -35,7 +44,7 @@ These rules govern implementation, diagnosis, review, release, and handoff. More
 
 - Bug fix: reproduce with a focused regression, implement the smallest fix, and prove the regression now passes.
 - Start with the narrowest relevant checks, then run changed-file gates and broader build, integration, E2E, security, or release gates in proportion to risk.
-- The normal AI Trace path is focused pytest, configured Ruff and Pyright scopes, the security gate, migration checks, and exact Docker image or health probes for runtime changes.
+- The normal AI Trace path is focused pytest plus configured Ruff and Pyright scopes. Security, migration, Docker, API, or health checks are proportional follow-ups only for explicitly authorized risk-reducing maintenance or a product-owned change, and must use an isolated target. Verification does not authorize deployment, provider execution, adoption, or capability expansion.
 - Test negative and adversarial cases for auth, isolation, validation, retries, partial failure, rollback, and cleanup when those boundaries change.
 - Verify APIs with actual requests and response bodies, UI with a real render and interaction, persistence with stored and reloaded state, and background work with produced results and logs.
 - If a required gate cannot run, report exactly what passed, what failed, and what remains unverified.
@@ -77,7 +86,7 @@ Report the exact branch and head, files changed, tests and probes run, runtime o
 
 ### AI Trace risk focus
 
-Prioritize tenant isolation, leader versus standby truth, advisory locking, stale-session projections, monotonic activity watermarks, approval-gated shutdown, dependency locks, production startup, and the development-only dashboard boundary.
+For an explicitly authorized component evaluation, prioritize tenant isolation, leader versus standby truth, advisory locking, stale-session projections, monotonic activity watermarks, approval-gated shutdown, dependency locks, and the development-only dashboard boundary. Do not treat those historical runtime surfaces as an active production roadmap.
 
 ## Repository map
 
@@ -90,8 +99,9 @@ python -m pytest <target> -q
 ruff check --select F src tests
 pyright
 ./scripts/security_gate.sh
-alembic upgrade head
 ```
+
+Docker, migrations, API startup, provider calls, outbound delivery, and deployment are not default commands. Run a required check only against an isolated disposable target for explicitly authorized risk-reducing maintenance or a product-owned change, and report the exact evidence boundary. The check itself does not authorize deployment, provider execution, adoption, or capability expansion.
 
 ## Codex-specific guidance
 

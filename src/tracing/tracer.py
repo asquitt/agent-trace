@@ -168,6 +168,8 @@ class Tracer:
             service_name: Name of the service for identification
             capture_prompts: Whether to capture full prompts/responses
         """
+        if type(capture_prompts) is not bool:
+            raise TypeError("capture_prompts must be a boolean")
         self.storage = storage
         self.service_name = service_name
         self.capture_prompts = capture_prompts
@@ -382,7 +384,7 @@ class Tracer:
         }
 
         # Capture prompts if enabled
-        if self.capture_prompts:
+        if self.capture_prompts is True:
             if system_prompt:
                 span_data["system_prompt"] = system_prompt
             if user_prompt:
@@ -421,7 +423,7 @@ class Tracer:
 
             if span_context._output_data:
                 update_data["output_data"] = span_context._output_data
-            if span_context._response_text and self.capture_prompts:
+            if span_context._response_text and self.capture_prompts is True:
                 update_data["assistant_response"] = span_context._response_text
 
             await self.storage.update_span(span_id, update_data)
