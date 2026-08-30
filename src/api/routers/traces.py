@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ...dependencies import AuthDep, StorageDep
 from ...models.trace import TraceStatus, TraceType
 from ...security import AuthContext, require_org_access, require_roles
+from ...tracing.tracer import REDACTED_REASONING_DESCRIPTION
 from ...utils.time import to_naive_utc
 
 router = APIRouter(prefix="/api/v1/traces", tags=["traces"])
@@ -141,6 +142,29 @@ def _require_trace_viewer(auth: AuthContext) -> None:
 
 def _require_sensitive_trace_access(auth: AuthContext) -> None:
     require_roles(auth, "admin")
+
+
+def _reasoning_step_response(
+    reasoning: Any,
+    *,
+    include_sensitive: bool,
+) -> ReasoningStepResponse:
+    return ReasoningStepResponse(
+        id=str(reasoning.id),
+        step_number=reasoning.step_number,
+        step_type=reasoning.step_type,
+        description=(
+            reasoning.description
+            if include_sensitive
+            else REDACTED_REASONING_DESCRIPTION
+        ),
+        dimension=reasoning.dimension,
+        raw_score=reasoning.raw_score,
+        weighted_score=reasoning.weighted_score,
+        weight_applied=reasoning.weight_applied,
+        explanation=reasoning.explanation if include_sensitive else None,
+        confidence=reasoning.confidence,
+    )
 
 
 def _resolve_trace_org_scope(auth: AuthContext, org_id: Optional[str]) -> Optional[str]:
@@ -371,18 +395,7 @@ async def get_trace(
             status=span.status.value if hasattr(span.status, "value") else str(span.status),
             error_message=span.error_message if include_prompts else None,
             reasoning_steps=[
-                ReasoningStepResponse(
-                    id=str(r.id),
-                    step_number=r.step_number,
-                    step_type=r.step_type,
-                    description=r.description,
-                    dimension=r.dimension,
-                    raw_score=r.raw_score,
-                    weighted_score=r.weighted_score,
-                    weight_applied=r.weight_applied,
-                    explanation=r.explanation,
-                    confidence=r.confidence,
-                )
+                _reasoning_step_response(r, include_sensitive=include_prompts)
                 for r in (span.reasoning_steps or [])
             ],
         )
@@ -423,6 +436,10 @@ async def get_trace_reasoning(
     trace_id: UUID,
     storage: StorageDep,
     auth: AuthDep,
+    include_prompts: bool = Query(
+        False,
+        description="Include sensitive model-derived reasoning text",
+    ),
 ) -> list[ReasoningStepResponse]:
     """Get all reasoning steps for a trace.
 
@@ -430,6 +447,8 @@ async def get_trace_reasoning(
     useful for understanding the decision chain.
     """
     _require_trace_viewer(auth)
+    if include_prompts:
+        _require_sensitive_trace_access(auth)
     resolved_org_id = _resolve_trace_org_scope(auth, None)
     trace = await storage.get_trace(trace_id, org_id=resolved_org_id)
     if not trace:
@@ -439,18 +458,7 @@ async def get_trace_reasoning(
     for span in trace.spans or []:
         for r in span.reasoning_steps or []:
             reasoning_steps.append(
-                ReasoningStepResponse(
-                    id=str(r.id),
-                    step_number=r.step_number,
-                    step_type=r.step_type,
-                    description=r.description,
-                    dimension=r.dimension,
-                    raw_score=r.raw_score,
-                    weighted_score=r.weighted_score,
-                    weight_applied=r.weight_applied,
-                    explanation=r.explanation,
-                    confidence=r.confidence,
-                )
+                _reasoning_step_response(r, include_sensitive=include_prompts)
             )
 
     return reasoning_steps
@@ -557,12 +565,16 @@ async def export_trace_json(
                 {
                     "step_number": r.step_number,
                     "step_type": r.step_type,
-                    "description": r.description,
+                    "description": (
+                        r.description
+                        if include_prompts
+                        else REDACTED_REASONING_DESCRIPTION
+                    ),
                     "dimension": r.dimension,
                     "raw_score": r.raw_score,
                     "weighted_score": r.weighted_score,
                     "weight_applied": r.weight_applied,
-                    "explanation": r.explanation,
+                    "explanation": r.explanation if include_prompts else None,
                     "confidence": r.confidence,
                 }
                 for r in (span.reasoning_steps or [])

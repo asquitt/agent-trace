@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -14,6 +15,9 @@ from fastapi import HTTPException
 from src.api.routers.traces import export_trace_json, get_trace, get_trace_reasoning
 from src.security import AuthContext
 from src.tracing.storage.postgres import PostgresStorageBackend
+from src.tracing.tracer import REDACTED_REASONING_DESCRIPTION
+
+SENSITIVE_REASONING_MARKER = "SECRET-historical-reasoning-payload"
 
 
 class _TraceStorage:
@@ -92,6 +96,18 @@ def _auth(
 
 def _trace(*, org_id: str | None = "acme") -> SimpleNamespace:
     now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+    reasoning = SimpleNamespace(
+        id=uuid4(),
+        step_number=1,
+        step_type="score_calculation",
+        description=SENSITIVE_REASONING_MARKER,
+        dimension="market",
+        raw_score=80.0,
+        weighted_score=20.0,
+        weight_applied=0.25,
+        explanation=SENSITIVE_REASONING_MARKER,
+        confidence=0.9,
+    )
     span = SimpleNamespace(
         id=uuid4(),
         span_type="llm_call",
@@ -108,7 +124,7 @@ def _trace(*, org_id: str | None = "acme") -> SimpleNamespace:
         system_prompt="system-secret",
         user_prompt="user-secret",
         assistant_response="assistant-secret",
-        reasoning_steps=[],
+        reasoning_steps=[reasoning],
     )
     return SimpleNamespace(
         id=uuid4(),
@@ -137,9 +153,13 @@ def _trace(*, org_id: str | None = "acme") -> SimpleNamespace:
 def test_trace_prompt_defaults_are_redacted() -> None:
     detail_default = inspect.signature(get_trace).parameters["include_prompts"].default
     export_default = inspect.signature(export_trace_json).parameters["include_prompts"].default
+    reasoning_default = inspect.signature(get_trace_reasoning).parameters[
+        "include_prompts"
+    ].default
 
     assert getattr(detail_default, "default", None) is False
     assert getattr(export_default, "default", None) is False
+    assert getattr(reasoning_default, "default", None) is False
 
 
 @pytest.mark.asyncio
@@ -162,6 +182,20 @@ async def test_postgres_trace_lookup_applies_org_filter_before_eager_load() -> N
 async def test_tenant_viewer_cannot_request_prompt_material(endpoint: Any) -> None:
     with pytest.raises(HTTPException) as exc:
         await endpoint(
+            uuid4(),
+            _NeverTraceStorage(),  # type: ignore[arg-type]
+            _auth(roles={"viewer"}, org_ids={"acme"}),
+            True,
+        )
+
+    assert exc.value.status_code == 403
+    assert "admin" in str(exc.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_tenant_viewer_cannot_request_sensitive_reasoning_material() -> None:
+    with pytest.raises(HTTPException) as exc:
+        await get_trace_reasoning(
             uuid4(),
             _NeverTraceStorage(),  # type: ignore[arg-type]
             _auth(roles={"viewer"}, org_ids={"acme"}),
@@ -229,6 +263,7 @@ async def test_foreign_reasoning_trace_is_not_materialized_or_identified() -> No
             trace.id,
             storage,  # type: ignore[arg-type]
             _auth(roles={"viewer"}, org_ids={"acme"}),
+            False,
         )
 
     assert exc.value.status_code == 404
@@ -239,7 +274,7 @@ async def test_foreign_reasoning_trace_is_not_materialized_or_identified() -> No
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("endpoint", [get_trace, export_trace_json])
-async def test_default_view_hides_historical_error_payloads(endpoint: Any) -> None:
+async def test_default_view_hides_historical_sensitive_payloads(endpoint: Any) -> None:
     trace = _trace()
     result = await endpoint(
         trace.id,
@@ -257,11 +292,18 @@ async def test_default_view_hides_historical_error_payloads(endpoint: Any) -> No
 
     assert trace_error is None
     assert span_error is None
+    serialized = (
+        json.dumps(result.model_dump(mode="json"), sort_keys=True)
+        if hasattr(result, "model_dump")
+        else json.dumps(result, sort_keys=True)
+    )
+    assert SENSITIVE_REASONING_MARKER not in serialized
+    assert REDACTED_REASONING_DESCRIPTION in serialized
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("endpoint", [get_trace, export_trace_json])
-async def test_explicit_admin_sensitive_view_can_read_error_payloads(endpoint: Any) -> None:
+async def test_explicit_admin_sensitive_view_can_read_sensitive_payloads(endpoint: Any) -> None:
     trace = _trace()
     result = await endpoint(
         trace.id,
@@ -279,6 +321,49 @@ async def test_explicit_admin_sensitive_view_can_read_error_payloads(endpoint: A
 
     assert trace_error == "trace-sensitive-error"
     assert span_error == "span-sensitive-error"
+    serialized = (
+        json.dumps(result.model_dump(mode="json"), sort_keys=True)
+        if hasattr(result, "model_dump")
+        else json.dumps(result, sort_keys=True)
+    )
+    assert SENSITIVE_REASONING_MARKER in serialized
+
+
+@pytest.mark.asyncio
+async def test_default_reasoning_view_redacts_model_derived_text() -> None:
+    trace = _trace()
+
+    reasoning = await get_trace_reasoning(
+        trace.id,
+        _TraceStorage(trace),  # type: ignore[arg-type]
+        _auth(roles={"viewer"}, org_ids={"acme"}),
+        False,
+    )
+
+    assert len(reasoning) == 1
+    assert reasoning[0].description == REDACTED_REASONING_DESCRIPTION
+    assert reasoning[0].explanation is None
+    assert reasoning[0].dimension == "market"
+    assert reasoning[0].raw_score == 80.0
+    assert SENSITIVE_REASONING_MARKER not in json.dumps(
+        [item.model_dump(mode="json") for item in reasoning],
+        sort_keys=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_explicit_admin_reasoning_view_can_read_model_derived_text() -> None:
+    trace = _trace()
+
+    reasoning = await get_trace_reasoning(
+        trace.id,
+        _TraceStorage(trace),  # type: ignore[arg-type]
+        _auth(roles={"admin"}, org_ids={"acme"}),
+        True,
+    )
+
+    assert reasoning[0].description == SENSITIVE_REASONING_MARKER
+    assert reasoning[0].explanation == SENSITIVE_REASONING_MARKER
 
 
 @pytest.mark.asyncio

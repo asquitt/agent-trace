@@ -347,8 +347,11 @@ def test_repository_surfaces_are_internal_and_manual_only() -> None:
     assert "historical stores contain no sensitive data" in normalized_readme
     for sensitive_trace_clause in (
         "deterministic safe error codes and exception types",
+        "generic 500 without re-logging the original exception",
+        "retains structural and numeric fields",
+        "redacting model-derived descriptions, contexts, results, and explanations",
         "organization predicate before prompt-bearing spans are loaded",
-        "sensitive error details",
+        "sensitive error, and model-derived reasoning details",
     ):
         assert sensitive_trace_clause in normalized_disposition
         assert sensitive_trace_clause in normalized_readme

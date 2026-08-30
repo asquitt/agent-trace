@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from contextvars import Token
 
 logger = structlog.get_logger(__name__)
+REDACTED_REASONING_DESCRIPTION = "Reasoning details redacted"
 
 
 class StorageBackend(Protocol):
@@ -111,16 +112,19 @@ class SpanContext:
             explanation: Plain-English explanation for customers
         """
         step_number = len(self._reasoning_steps) + 1
+        capture_sensitive_content = self.tracer.capture_prompts is True
         reasoning: ReasoningData = {
             "id": str(uuid4()),
             "span_id": str(self.span_id),
             "step_number": step_number,
             "step_type": step_type,
-            "description": description,
+            "description": (
+                description if capture_sensitive_content else REDACTED_REASONING_DESCRIPTION
+            ),
         }
-        if input_context is not None:
+        if capture_sensitive_content and input_context is not None:
             reasoning["input_context"] = input_context
-        if output_result is not None:
+        if capture_sensitive_content and output_result is not None:
             reasoning["output_result"] = output_result
         if confidence is not None:
             reasoning["confidence"] = confidence
@@ -132,7 +136,7 @@ class SpanContext:
             reasoning["weighted_score"] = weighted_score
         if weight_applied is not None:
             reasoning["weight_applied"] = weight_applied
-        if explanation is not None:
+        if capture_sensitive_content and explanation is not None:
             reasoning["explanation"] = explanation
 
         self._reasoning_steps.append(reasoning)

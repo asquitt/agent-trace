@@ -141,15 +141,33 @@ async def request_observability_middleware(request: Request, call_next):  # type
 
     try:
         response = await _dispatch_with_rate_limit()
-    except Exception:
-        metrics["status_counts"][500] += 1
-        logger.exception(
+    except Exception as exc:
+        if settings.trace_capture_prompts is True:
+            metrics["status_counts"][500] += 1
+            logger.exception(
+                "request_failed",
+                request_id=request_id,
+                method=request.method,
+                path=request.url.path,
+            )
+            raise
+
+        logger.error(
             "request_failed",
+            error_code="request_processing_failed",
+            exception_type=type(exc).__name__,
             request_id=request_id,
             method=request.method,
             path=request.url.path,
         )
-        raise
+        response = JSONResponse(
+            status_code=500,
+            content={
+                "detail": "Internal server error",
+                "error_code": "request_processing_failed",
+                "request_id": request_id,
+            },
+        )
     finally:
         elapsed_ms = (time.perf_counter() - start) * 1000
         metrics["total_duration_ms"] += elapsed_ms
