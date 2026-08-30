@@ -4,6 +4,13 @@ set -uo pipefail
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_DIR="${LOCAL_CI_ROOT_OVERRIDE:-$SCRIPT_ROOT}"
 cd "$ROOT_DIR"
+
+# Git hooks export repository-local variables. Clear them before this script
+# opens the detached validation clone, or Git can keep targeting the caller.
+while IFS= read -r local_git_env_var; do
+  unset "$local_git_env_var"
+done < <(git rev-parse --local-env-vars)
+
 export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 MODE="${1:-}"

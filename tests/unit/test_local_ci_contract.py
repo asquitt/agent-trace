@@ -149,6 +149,8 @@ def test_push_gate_preserves_repository_coverage_and_console_quality() -> None:
 
     assert "SKIP" not in script
     assert 'export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"' in script
+    assert "git rev-parse --local-env-vars" in script
+    assert 'unset "$local_git_env_var"' in script
     assert 'git clone --quiet --no-hardlinks --no-checkout "$ROOT_DIR"' in script
     assert 'checkout --quiet --detach "$TARGET_SHA"' in script
     assert 'if [[ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]' in script
