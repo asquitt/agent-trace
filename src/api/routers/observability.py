@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import case, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ...config import Settings
 from ...dependencies import AuthDep, SettingsDep, StorageDep
 from ...models.observability import (
     ActionType,
@@ -56,6 +57,10 @@ from ...services.observability_runtime import (
     run_anomaly_detectors,
 )
 from ...services.operations_scheduler import public_scheduler_status
+from ...services.runtime_governance import (
+    RuntimeGovernanceDisabledError,
+    require_runtime_governance,
+)
 from ...utils.time import to_naive_utc, utc_now_iso, utc_now_naive
 
 router = APIRouter(prefix="/api/v1/observability", tags=["observability"])
@@ -71,6 +76,16 @@ def _to_iso(dt: Optional[datetime]) -> Optional[str]:
 
 def _enum_str(value: Any) -> str:
     return value.value if hasattr(value, "value") else str(value)
+
+
+def _require_runtime_governance(settings: Settings) -> None:
+    try:
+        require_runtime_governance(settings)
+    except RuntimeGovernanceDisabledError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
 
 
 _ANOMALY_SEVERITY_RANK = {
@@ -497,6 +512,7 @@ async def _dispatch_runtime_notifications(
     policy_summary: Optional[dict[str, Any]] = None,
     extra_targets: Optional[list[str]] = None,
 ) -> dict[str, Any]:
+    _require_runtime_governance(settings)
     payload = {
         "event_type": "observability_runtime_event",
         "org_id": org_id,
@@ -558,6 +574,7 @@ async def _dispatch_runtime_notifications(
         allowed_hosts=settings.observability_notification_allowed_hosts,
         idempotent_webhooks=settings.observability_notification_idempotent_webhooks,
         fingerprint_key=settings.observability_notification_fingerprint_key,
+        runtime_governance_enabled=settings.runtime_governance_enabled,
     )
     result["event_severity"] = event_severity
     result["min_severity"] = min_severity
@@ -970,8 +987,8 @@ class PolicyApprovalListResponse(BaseModel):
 class PolicyEvaluationRequest(BaseModel):
     org_id: str
     as_of: Optional[datetime] = None
-    execute_actions: bool = True
-    notify: bool = True
+    execute_actions: bool = False
+    notify: bool = False
     extra_notification_targets: list[str] = Field(default_factory=list, alias="extra_webhook_targets")
 
     model_config = {"populate_by_name": True}
@@ -1161,9 +1178,9 @@ class DetectorRunRequest(BaseModel):
     memory_divergence_threshold: float = Field(default=0.30, ge=0.0, le=1.0)
     anomaly_dedupe_window_minutes: int = Field(default=30, ge=1, le=1440)
     anomaly_reopen_acknowledged: bool = True
-    auto_evaluate_policies: bool = True
-    execute_policy_actions: bool = True
-    notify: bool = True
+    auto_evaluate_policies: bool = False
+    execute_policy_actions: bool = False
+    notify: bool = False
     extra_notification_targets: list[str] = Field(default_factory=list, alias="extra_webhook_targets")
 
     model_config = {"populate_by_name": True}
@@ -1179,9 +1196,9 @@ class DetectorRunResponse(BaseModel):
 class RuntimeOperationsRunRequest(BaseModel):
     org_id: str
     run_detectors: bool = True
-    run_policies: bool = True
-    execute_policy_actions: bool = True
-    notify: bool = True
+    run_policies: bool = False
+    execute_policy_actions: bool = False
+    notify: bool = False
     as_of: Optional[datetime] = None
     current_window_minutes: int = Field(default=15, ge=1, le=180)
     baseline_window_hours: int = Field(default=24, ge=1, le=168)
@@ -1977,9 +1994,11 @@ async def ingest_action_batch(
     storage: StorageDep,
     settings: SettingsDep,
     auth: AuthDep,
-    evaluate_policies_flag: bool = Query(True, alias="evaluate_policies"),
+    evaluate_policies_flag: bool = Query(False, alias="evaluate_policies"),
 ) -> BatchIngestResponse:
     _require_operator(auth)
+    if evaluate_policies_flag:
+        _require_runtime_governance(settings)
     async with storage.session_factory() as session:
         session_row = await session.get(AgentSession, payload.session_id)
         if not session_row:
@@ -2103,6 +2122,7 @@ async def ingest_action_batch(
                     deployment.org_id,
                     as_of=latest_event or received_at,
                     execute_actions=True,
+                    runtime_governance_enabled=settings.runtime_governance_enabled,
                     require_shutdown_approval=settings.observability_shutdown_requires_approval,
                     approval_max_age_minutes=settings.observability_shutdown_approval_max_age_minutes,
                 )
@@ -2442,6 +2462,7 @@ async def create_policy_approval(
 ) -> PolicyApprovalResponse:
     _require_operator(auth)
     _enforce_org_scope(auth, payload.org_id)
+    _require_runtime_governance(settings)
     requested_at = utc_now_naive()
     expires_at = _to_db_datetime(payload.expires_at) or (
         requested_at.replace(microsecond=0)
@@ -2498,10 +2519,12 @@ async def decide_policy_approval(
     approval_id: UUID,
     payload: PolicyApprovalDecisionRequest,
     storage: StorageDep,
+    settings: SettingsDep,
     auth: AuthDep,
     request: Request,
 ) -> PolicyApprovalResponse:
     _require_admin(auth)
+    _require_runtime_governance(settings)
     if payload.decision not in {PolicyApprovalStatus.APPROVED, PolicyApprovalStatus.REJECTED}:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -2613,6 +2636,8 @@ async def evaluate_policies(
 ) -> PolicyEvaluationResponse:
     _require_operator(auth)
     _enforce_org_scope(auth, payload.org_id)
+    if payload.execute_actions or payload.notify:
+        _require_runtime_governance(settings)
     started_at = utc_now_naive()
     notification_result: Optional[dict[str, Any]] = None
     async with storage.session_factory() as session:
@@ -2621,6 +2646,7 @@ async def evaluate_policies(
             payload.org_id,
             as_of=_to_db_datetime(payload.as_of),
             execute_actions=payload.execute_actions,
+            runtime_governance_enabled=settings.runtime_governance_enabled,
             require_shutdown_approval=settings.observability_shutdown_requires_approval,
             approval_max_age_minutes=settings.observability_shutdown_approval_max_age_minutes,
         )
@@ -2711,6 +2737,8 @@ async def simulate_policies(
                 payload.org_id,
                 as_of=cursor,
                 execute_actions=payload.project_actions,
+                # Projected mutations are always rolled back before leaving this block.
+                runtime_governance_enabled=True,
                 require_shutdown_approval=settings.observability_shutdown_requires_approval,
                 approval_max_age_minutes=settings.observability_shutdown_approval_max_age_minutes,
             )
@@ -3252,6 +3280,8 @@ async def run_detectors(
 ) -> DetectorRunResponse:
     _require_operator(auth)
     _enforce_org_scope(auth, payload.org_id)
+    if payload.execute_policy_actions or payload.notify:
+        _require_runtime_governance(settings)
     started_at = utc_now_naive()
     config = DetectorConfig(
         current_window_minutes=payload.current_window_minutes,
@@ -3279,6 +3309,7 @@ async def run_detectors(
                 payload.org_id,
                 as_of=_to_db_datetime(payload.as_of),
                 execute_actions=payload.execute_policy_actions,
+                runtime_governance_enabled=settings.runtime_governance_enabled,
                 require_shutdown_approval=settings.observability_shutdown_requires_approval,
                 approval_max_age_minutes=settings.observability_shutdown_approval_max_age_minutes,
             )
@@ -3350,6 +3381,8 @@ async def run_operations_cycle(
 ) -> RuntimeOperationsRunResponse:
     _require_operator(auth)
     _enforce_org_scope(auth, payload.org_id)
+    if payload.execute_policy_actions or payload.notify:
+        _require_runtime_governance(settings)
     started_at = utc_now_naive()
     detector_summary: dict[str, Any] = {}
     policy_summary: dict[str, Any] = {}
@@ -3379,6 +3412,7 @@ async def run_operations_cycle(
                 payload.org_id,
                 as_of=_to_db_datetime(payload.as_of),
                 execute_actions=payload.execute_policy_actions,
+                runtime_governance_enabled=settings.runtime_governance_enabled,
                 require_shutdown_approval=settings.observability_shutdown_requires_approval,
                 approval_max_age_minutes=settings.observability_shutdown_approval_max_age_minutes,
             )
@@ -3583,6 +3617,8 @@ async def export_siem_events(
 ) -> SiemExportResponse:
     _require_admin(auth)
     _enforce_org_scope(auth, payload.org_id)
+    if not payload.dry_run:
+        _require_runtime_governance(settings)
     from_time = _to_db_datetime(payload.from_time)
     to_time = _to_db_datetime(payload.to_time)
     if to_time < from_time:
@@ -3780,6 +3816,7 @@ async def export_siem_events(
             allowed_hosts=settings.observability_notification_allowed_hosts,
             idempotent_webhooks=settings.observability_notification_idempotent_webhooks,
             fingerprint_key=settings.observability_notification_fingerprint_key,
+            runtime_governance_enabled=settings.runtime_governance_enabled,
         )
 
     await _store_audit_event(

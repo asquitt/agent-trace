@@ -15,11 +15,24 @@ from src.models.observability import AgentDeployment, AgentSession, SessionStatu
 @pytest.fixture()
 def client() -> TestClient:
     """Create a TestClient or skip if infrastructure is unavailable."""
+    previous_override = app.dependency_overrides.get(get_settings)
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None,
+        api_auth_enabled=False,
+        api_require_tenant_header=False,
+        api_rate_limit_enabled=False,
+        runtime_governance_enabled=True,
+    )
     try:
         with TestClient(app) as test_client:
             yield test_client
     except Exception as exc:  # pragma: no cover - infra dependent
         pytest.skip(f"Observability integration test skipped (infra unavailable): {exc}")
+    finally:
+        if previous_override is None:
+            app.dependency_overrides.pop(get_settings, None)
+        else:
+            app.dependency_overrides[get_settings] = previous_override
 
 
 def test_observability_end_to_end_smoke(client: TestClient) -> None:
@@ -292,7 +305,7 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
 
     policy_eval_resp = client.post(
         "/api/v1/observability/policies/evaluate",
-        json={"org_id": org_id, "execute_actions": False},
+        json={"org_id": org_id, "execute_actions": False, "notify": True},
     )
     assert policy_eval_resp.status_code == 200
     assert policy_eval_resp.json()["evaluation"]["evaluated_policies"] >= 1
@@ -540,6 +553,7 @@ def test_observability_end_to_end_smoke(client: TestClient) -> None:
         json={
             "org_id": org_id,
             "auto_evaluate_policies": True,
+            "notify": True,
             "anomaly_dedupe_window_minutes": 60,
             "anomaly_reopen_acknowledged": True,
         },

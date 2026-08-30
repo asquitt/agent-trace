@@ -159,7 +159,7 @@ class Tracer:
         self,
         storage: StorageBackend,
         service_name: str = "ai-trace",
-        capture_prompts: bool = True,
+        capture_prompts: bool = False,
     ):
         """Initialize the tracer.
 

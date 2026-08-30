@@ -1,3 +1,4 @@
+# MANUAL LOCAL BUILD REFERENCE: retained for exact-SHA quality gates; not a published image.
 ARG PYTHON_IMAGE=python:3.11.15-slim@sha256:90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff
 ARG NODE_IMAGE=node:22.14.0-alpine3.21@sha256:9bef0ef1e268f60627da9ba7d7605e8831d5b56ad07487d24d1aa386336d1944
 

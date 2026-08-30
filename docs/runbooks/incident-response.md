@@ -2,6 +2,9 @@
 
 Last updated: August 27, 2026
 
+> Status: Frozen manual reference for a future host-owned integration. AI Trace has no current
+> repository-owned production target, incident channel, alert routing, or on-call operation.
+
 ## Severity Levels
 
 - Sev1: Full outage, policy engine unavailable, or data integrity risk.

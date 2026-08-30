@@ -42,6 +42,7 @@ from .notifications import (
     sanitize_runtime_notification_payload,
     validate_notification_https_target,
 )
+from .runtime_governance import require_runtime_governance
 
 logger = structlog.get_logger(__name__)
 
@@ -140,7 +141,10 @@ class NotificationOutboxService:
         self._session_factory = session_factory
         self._settings = settings
         self._fingerprint_key = settings.observability_notification_fingerprint_key.get_secret_value()
-        if settings.observability_scheduler_enable_notifications:
+        if (
+            settings.runtime_governance_enabled
+            and settings.observability_scheduler_enable_notifications
+        ):
             if len(self._fingerprint_key.encode("utf-8")) < 32:
                 raise ValueError(
                     "scheduled notifications require a 32-byte fingerprint key"
@@ -265,6 +269,7 @@ class NotificationOutboxService:
         policy_summary: dict[str, Any],
     ) -> dict[str, Any]:
         """Stage outbox rows in the caller's fenced producer transaction."""
+        require_runtime_governance(self._settings)
         payload = sanitize_runtime_notification_payload(
             {
                 "event_type": "observability_scheduler_run",
@@ -465,6 +470,7 @@ class NotificationOutboxService:
         recover_expired: bool = True,
     ) -> list[ClaimedNotification]:
         """Claim due deliveries and create attempt evidence in one short transaction."""
+        require_runtime_governance(self._settings)
         claimed: list[ClaimedNotification] = []
         # Commit expired-claim recovery before selecting new work. PostgreSQL may
         # otherwise omit a row whose indexed status changed earlier in the same
@@ -770,6 +776,7 @@ class NotificationOutboxService:
         *,
         worker_id: str,
     ) -> str:
+        require_runtime_governance(self._settings)
         timeout_seconds = self._settings.observability_notification_timeout_seconds
         deadline = asyncio.get_running_loop().time() + timeout_seconds
         try:
@@ -906,6 +913,7 @@ class NotificationOutboxService:
 
     async def drain_ready(self, *, org_id: str, limit: int) -> DrainSummary:
         """Claim each row immediately before delivery; never lease a serial batch."""
+        require_runtime_governance(self._settings)
         worker_id = str(uuid4())
         counts: Counter[str] = Counter()
         claimed_count = 0

@@ -1,7 +1,8 @@
+# FROZEN MANUAL REFERENCE: not applied by this repository and not deployment evidence.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: ai-trace-prod
+  name: ai-trace-internal
   labels:
     app.kubernetes.io/name: ai-trace
     app.kubernetes.io/part-of: ai-trace-platform

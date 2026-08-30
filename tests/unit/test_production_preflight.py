@@ -8,6 +8,7 @@ from src.services.production_preflight import run_preflight
 
 def test_preflight_flags_missing_hardening_controls(tmp_path: Path) -> None:
     settings = Settings(
+        runtime_governance_enabled=True,
         api_auth_enabled=False,
         api_keys=[],
         api_require_tenant_header=False,
@@ -36,6 +37,7 @@ def test_preflight_passes_for_hardened_configuration(tmp_path: Path) -> None:
     console_dist.mkdir()
     (console_dist / "index.html").write_text("<!doctype html>", encoding="utf-8")
     settings = Settings(
+        runtime_governance_enabled=True,
         database_url="postgresql+asyncpg://user:pass@db:5432/ai_trace",
         redis_url="redis://redis:6379/0",
         api_auth_enabled=True,
@@ -83,6 +85,7 @@ def test_preflight_accepts_safe_scheduler_notification_contract(tmp_path: Path) 
     console_dist.mkdir()
     (console_dist / "index.html").write_text("<!doctype html>", encoding="utf-8")
     settings = Settings(
+        runtime_governance_enabled=True,
         database_url="postgresql+asyncpg://user:pass@db:5432/ai_trace",
         redis_url="redis://redis:6379/0",
         api_auth_enabled=True,
@@ -108,6 +111,7 @@ def test_preflight_rejects_claim_without_finalization_margin(tmp_path: Path) -> 
     console_dist.mkdir()
     (console_dist / "index.html").write_text("<!doctype html>", encoding="utf-8")
     settings = Settings(
+        runtime_governance_enabled=True,
         operator_console_dist_dir=str(console_dist),
         observability_scheduler_enabled=True,
         observability_scheduler_org_ids=["acme"],
@@ -130,3 +134,16 @@ def test_preflight_rejects_missing_operator_console(tmp_path: Path) -> None:
     failures = [result.message for result in run_preflight(settings) if result.status == "fail"]
 
     assert any("Built operator console assets must exist" in message for message in failures)
+
+
+def test_preflight_rejects_stale_autonomy_flags_while_governance_is_frozen() -> None:
+    settings = Settings(
+        runtime_governance_enabled=False,
+        observability_scheduler_enabled=True,
+        observability_scheduler_run_policies=True,
+        observability_scheduler_execute_policy_actions=True,
+    )
+
+    failures = [result.message for result in run_preflight(settings) if result.status == "fail"]
+
+    assert any("Disabled runtime governance" in message for message in failures)

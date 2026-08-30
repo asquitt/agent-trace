@@ -17,6 +17,7 @@ from src.services.operations_scheduler import (
     SchedulerFenceLost,
     SchedulerLeadershipLock,
 )
+from src.services.runtime_governance import RuntimeGovernanceDisabledError
 
 
 class FakeLeadershipCoordinator:
@@ -201,6 +202,7 @@ class FakeRunSessionFactory:
 
 def _settings(**overrides: Any) -> Settings:
     values: dict[str, Any] = {
+        "runtime_governance_enabled": True,
         "observability_scheduler_enabled": False,
         "observability_scheduler_org_ids": [],
         "observability_scheduler_interval_seconds": 60,
@@ -384,6 +386,27 @@ async def test_scheduler_does_not_start_when_disabled() -> None:
     assert status["enabled"] is False
     assert status["running"] is False
     await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_governance_freeze_overrides_scheduler_configuration() -> None:
+    scheduler = ObservabilityOperationsScheduler(
+        _session_factory_stub(),
+        _settings(
+            runtime_governance_enabled=False,
+            observability_scheduler_enabled=True,
+            observability_scheduler_org_ids=["acme"],
+        ),
+        leadership_lock=_leadership_lock_stub(),
+        durable_fence=_durable_fence_stub(),
+    )
+
+    await scheduler.start()
+
+    assert scheduler.status()["enabled"] is False
+    assert scheduler.status()["running"] is False
+    with pytest.raises(RuntimeGovernanceDisabledError, match="runtime_governance_disabled"):
+        await scheduler.run_once("acme")
 
 
 @pytest.mark.asyncio

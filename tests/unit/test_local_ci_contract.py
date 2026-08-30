@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tomllib
 from pathlib import Path
@@ -10,9 +11,26 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[2]
 
 
-def test_hosted_pr_ci_is_replaced_without_disabling_production_drills() -> None:
+def test_all_hosted_workflows_require_manual_dispatch() -> None:
     assert not (ROOT_DIR / ".github" / "workflows" / "ci.yml").exists()
-    assert (ROOT_DIR / ".github" / "workflows" / "production-gates.yml").is_file()
+    workflows = list((ROOT_DIR / ".github" / "workflows").glob("*.y*ml"))
+    assert workflows
+
+    for path in workflows:
+        header = path.read_text(encoding="utf-8").split("\njobs:", 1)[0]
+        assert re.search(r"^  workflow_dispatch:\s*$", header, re.MULTILINE)
+        for trigger in (
+            "schedule",
+            "push",
+            "pull_request",
+            "pull_request_target",
+            "workflow_run",
+            "workflow_call",
+            "repository_dispatch",
+            "release",
+            "deployment",
+        ):
+            assert not re.search(rf"^  {trigger}:\s*$", header, re.MULTILINE)
 
 
 def test_pre_commit_configuration_installs_the_fast_commit_hook() -> None:
@@ -113,7 +131,7 @@ def test_pre_commit_version_supports_the_repository_git_toolchain() -> None:
     assert "pre-commit>=3.6.0,<4.0.0" in dev_dependencies
 
 
-def test_push_gate_preserves_hosted_ci_coverage_and_console_quality() -> None:
+def test_push_gate_preserves_repository_coverage_and_console_quality() -> None:
     script = (ROOT_DIR / "scripts" / "local_ci.sh").read_text(encoding="utf-8")
 
     required_commands = (
@@ -130,9 +148,64 @@ def test_push_gate_preserves_hosted_ci_coverage_and_console_quality() -> None:
         assert command in script
 
     assert "SKIP" not in script
+    assert 'export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"' in script
+    assert 'if [[ "$MODE" != "--commit" ]]' in script
+    assert "git rev-parse --local-env-vars" in script
+    assert 'unset "$local_git_env_var"' in script
     assert 'git clone --quiet --no-hardlinks --no-checkout "$ROOT_DIR"' in script
     assert 'checkout --quiet --detach "$TARGET_SHA"' in script
     assert 'if [[ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]' in script
+
+
+def test_commit_gate_checks_gits_prepared_index(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env["GIT_INDEX_FILE"] = str(tmp_path / "prepared.index")
+    subprocess.run(
+        ["git", "read-tree", "HEAD"],
+        cwd=ROOT_DIR,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    blob = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"],
+        cwd=ROOT_DIR,
+        check=True,
+        capture_output=True,
+        text=True,
+        input="prepared index trailing whitespace   \n",
+    ).stdout.strip()
+    subprocess.run(
+        [
+            "git",
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "100644",
+            blob,
+            "prepared-index-regression.md",
+        ],
+        cwd=ROOT_DIR,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    result = subprocess.run(
+        ["bash", "scripts/local_ci.sh", "--commit"],
+        cwd=ROOT_DIR,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 1
+    assert "FAIL  staged diff integrity" in result.stdout
+    assert "trailing whitespace" in result.stdout
 
 
 def test_local_ci_rejects_unknown_modes() -> None:

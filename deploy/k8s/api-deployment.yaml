@@ -1,8 +1,9 @@
+# FROZEN MANUAL REFERENCE: not applied by this repository and not deployment evidence.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ai-trace-api
-  namespace: ai-trace-prod
+  namespace: ai-trace-internal
   labels:
     app: ai-trace-api
 spec:
@@ -38,8 +39,8 @@ spec:
               topologyKey: kubernetes.io/hostname
       containers:
         - name: api
-          image: ghcr.io/asquitt/agent-trace:main
-          imagePullPolicy: IfNotPresent
+          image: ai-trace-internal:manual
+          imagePullPolicy: Never
           ports:
             - name: http
               containerPort: 8000
@@ -62,8 +63,18 @@ spec:
               value: "true"
             - name: API_RATE_LIMIT_MAX_KEYS
               value: "100000"
+            - name: TRACE_CAPTURE_PROMPTS
+              value: "false"
+            - name: RUNTIME_GOVERNANCE_ENABLED
+              value: "false"
             - name: OBSERVABILITY_SCHEDULER_ENABLED
-              value: "true"
+              value: "false"
+            - name: OBSERVABILITY_SCHEDULER_RUN_DETECTORS
+              value: "false"
+            - name: OBSERVABILITY_SCHEDULER_RUN_POLICIES
+              value: "false"
+            - name: OBSERVABILITY_SCHEDULER_EXECUTE_POLICY_ACTIONS
+              value: "false"
             - name: OBSERVABILITY_SCHEDULER_ENABLE_NOTIFICATIONS
               value: "false"
             - name: OBSERVABILITY_SCHEDULER_LEASE_SECONDS

@@ -1,3 +1,4 @@
+# FROZEN MANUAL REFERENCE: not applied by this repository and not deployment evidence.
 service: ai-trace
 window: 30d
 objectives:
@@ -16,7 +17,7 @@ objectives:
     target: 99.5
     indicator:
       type: ratio
-      query: 1 - (sum(increase(kube_pod_container_status_restarts_total{namespace="ai-trace-prod",container="api"}[5m])) / 100)
+      query: 1 - (sum(increase(kube_pod_container_status_restarts_total{namespace="ai-trace-internal",container="api"}[5m])) / 100)
 error_budget_policy:
   page_threshold_percent: 50
   ticket_threshold_percent: 25

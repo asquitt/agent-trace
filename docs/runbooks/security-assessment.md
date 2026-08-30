@@ -2,9 +2,12 @@
 
 Last updated: August 27, 2026
 
+> Status: Frozen manual reference. Gates and reports cover repository artifacts only unless a
+> host system separately records exact deployment, runtime, provider, and operator evidence.
+
 ## Objective
 
-Provide repeatable security gates for each release and quarterly external review readiness.
+Provide repeatable, manually invoked security checks for an internal component candidate.
 
 ## Automated Security Gates
 

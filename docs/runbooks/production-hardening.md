@@ -2,9 +2,13 @@
 
 Last updated: August 27, 2026
 
+> Status: Frozen manual reference for a future host-owned integration. The topology below is
+> design material, not a current deployment, production requirement, or runtime evidence.
+
 ## Scope
 
-This runbook operationalizes production hardening for AI Trace across deployment topology, resilience, and monitoring.
+This runbook records a possible host-owned hardening profile for deployment topology,
+resilience, and monitoring.
 
 ## Required Deployment Topology
 
@@ -30,24 +34,12 @@ This runbook operationalizes production hardening for AI Trace across deployment
 3. SLO definitions (`deploy/slo/slo-objectives.yaml`).
 4. Runtime health surfaces: `/health/live`, `/health/ready`, `/metrics`.
 
-## Release Gate Checklist
+## Historical Local Validation
 
-- [x] `ai-trace-preflight` passes in target environment.
-- [x] The synthetic performance gate passes with the production threshold profile for
-  the exact release candidate. Evidence: local ignored
-  `docs/reports/perf/perf-gate-20260827T125448Z.json` (284 calls, zero failures,
-  actions-batch p95 505ms, worst read p95 597ms). The measured profile set
-  `DATABASE_POOL_SIZE=24` and `DATABASE_MAX_OVERFLOW=0` for concurrency 24; preserve or
-  revalidate that capacity contract in the target environment.
-- [x] `scripts/backup_restore_drill.sh` passes with matching before/after counts for the
-  current migration graph. Evidence: local ignored
-  `docs/reports/dr/backup-restore-drill-20260827T124805Z.json` (`before=after=1/1/1`).
-- [x] Fail-closed security gate passes for the release candidate: `bandit`, the
-  hash-locked production dependency audit, and endpoint security-contract tests.
-  Evidence: local ignored `docs/reports/security/security-gate-20260827T125633Z.json`
-  (69 exact locked dependencies, zero known vulnerabilities). Every future production
-  finding requires remediation or explicit, unexpired risk acceptance under
-  `docs/security/vulnerability-waivers.json`.
-- [ ] Alert routes and on-call escalations are configured and tested in the target
-  environment. References: `docs/runbooks/oncall-operations.md`,
-  `docs/runbooks/incident-response.md`.
+August 27 local runs were previously reported for preflight, synthetic performance,
+backup/restore, and security gates. Their ignored artifacts are not retained in this exact tree,
+so they are historical observations rather than current or independently reproducible evidence.
+
+Any future host-owned adoption must rerun the relevant gates against its immutable candidate and
+target configuration, then separately prove deployment identity, persistence, alert routing,
+rollback, and operator-visible behavior.

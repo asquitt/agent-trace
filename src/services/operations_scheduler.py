@@ -24,6 +24,7 @@ from .observability_runtime import (
     evaluate_budget_policies,
     run_anomaly_detectors,
 )
+from .runtime_governance import require_runtime_governance
 
 logger = structlog.get_logger(__name__)
 
@@ -503,7 +504,10 @@ class ObservabilityOperationsScheduler:
             "running": False,
             "is_leader": False,
             "leadership_state": (
-                "stopped" if settings.observability_scheduler_enabled else "disabled"
+                "stopped"
+                if settings.runtime_governance_enabled
+                and settings.observability_scheduler_enabled
+                else "disabled"
             ),
             "last_leadership_change_at": None,
             "last_leadership_error": None,
@@ -517,6 +521,9 @@ class ObservabilityOperationsScheduler:
 
     async def start(self) -> None:
         """Start scheduler loop if enabled."""
+        if not self._settings.runtime_governance_enabled:
+            logger.info("runtime_governance_disabled")
+            return
         if not self._settings.observability_scheduler_enabled:
             logger.info("observability_scheduler_disabled")
             return
@@ -548,14 +555,20 @@ class ObservabilityOperationsScheduler:
         self._task = None
         self._state["running"] = False
         self._set_leadership_state(
-            "stopped" if self._settings.observability_scheduler_enabled else "disabled"
+            "stopped"
+            if self._settings.runtime_governance_enabled
+            and self._settings.observability_scheduler_enabled
+            else "disabled"
         )
         logger.info("observability_scheduler_stopped")
 
     def status(self) -> dict[str, Any]:
         """Get a public-safe scheduler status without tenant identifiers."""
         return {
-            "enabled": self._settings.observability_scheduler_enabled,
+            "enabled": (
+                self._settings.runtime_governance_enabled
+                and self._settings.observability_scheduler_enabled
+            ),
             "running": self._state["running"],
             "is_leader": self._state["is_leader"],
             "leadership_state": self._state["leadership_state"],
@@ -834,6 +847,7 @@ class ObservabilityOperationsScheduler:
 
     async def run_once(self, org_id: str) -> dict[str, Any]:
         """Run one detectors + policy loop for a single org."""
+        require_runtime_governance(self._settings)
         run_started = utc_now_iso()
         detector_summary: dict[str, Any] = {}
         policy_summary: dict[str, Any] = {}
@@ -870,6 +884,9 @@ class ObservabilityOperationsScheduler:
                             org_id,
                             execute_actions=(
                                 self._settings.observability_scheduler_execute_policy_actions
+                            ),
+                            runtime_governance_enabled=(
+                                self._settings.runtime_governance_enabled
                             ),
                             require_shutdown_approval=(
                                 self._settings.observability_shutdown_requires_approval

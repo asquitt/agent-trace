@@ -44,6 +44,7 @@ def _database() -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
 
 def _settings(target: str, *, idempotent: bool) -> Settings:
     return Settings(
+        runtime_governance_enabled=True,
         observability_notification_only_on_actionable=False,
         observability_notification_min_severity="info",
         observability_notification_webhooks=[target],
@@ -409,6 +410,7 @@ async def test_pagerduty_retries_reuse_provider_dedup_key(
     org_id = f"outbox-pagerduty-{uuid4()}"
     routing_key = "pagerduty-routing-secret"
     settings = Settings(
+        runtime_governance_enabled=True,
         observability_notification_only_on_actionable=False,
         observability_notification_min_severity="info",
         observability_notification_pagerduty_routing_keys=[routing_key],

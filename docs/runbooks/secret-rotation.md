@@ -2,9 +2,12 @@
 
 Last updated: August 27, 2026
 
+> Status: Frozen manual reference for a future host-owned integration. This repository owns no
+> production secret store, deployed Kubernetes secrets, rotation schedule, or rollout evidence.
+
 ## Scope
 
-Rotates all AI Trace production secrets without downtime.
+Describes how a future host could rotate AI Trace integration secrets without downtime.
 
 ## Secrets in Scope
 

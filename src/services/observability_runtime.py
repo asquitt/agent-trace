@@ -35,8 +35,9 @@ from ..models.observability import (
     RuntimeControlRequest,
     SessionStatus,
 )
-from .runtime_controls import runtime_control_idempotency_key
 from ..utils.time import to_naive_utc, utc_now_naive
+from .runtime_controls import runtime_control_idempotency_key
+from .runtime_governance import require_runtime_governance_enabled
 
 
 def _enum_value(value: Any) -> str:
@@ -411,11 +412,14 @@ async def evaluate_budget_policies(
     org_id: str,
     *,
     as_of: Optional[datetime] = None,
-    execute_actions: bool = True,
+    execute_actions: bool = False,
+    runtime_governance_enabled: bool = False,
     require_shutdown_approval: bool = False,
     approval_max_age_minutes: int = 60,
 ) -> dict[str, Any]:
     """Evaluate budget policies and persist configured control requests."""
+    if execute_actions:
+        require_runtime_governance_enabled(runtime_governance_enabled)
     now = ensure_naive_utc(as_of) or utc_now_naive()
     policies_query = select(BudgetPolicy).where(
         BudgetPolicy.org_id == org_id,

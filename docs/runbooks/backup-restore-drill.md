@@ -2,6 +2,9 @@
 
 Last updated: February 14, 2026
 
+> Status: Frozen manual reference for a future host-owned integration. There is no current
+> repository-owned deployment, recurring drill, or production evidence.
+
 ## Goal
 
 Validate backup integrity and disaster recovery restore procedures for AI Trace PostgreSQL state.
@@ -39,8 +42,8 @@ The drill performs:
   - `agent_sessions`
   - `agent_actions`
 
-## Required Frequency
+## Execution Policy
 
-- Minimum weekly in staging.
-- Minimum monthly in production.
-- Mandatory before and after major schema changes.
+- Run only on explicit operator request for an adopted host environment or schema-change review.
+- Do not schedule this drill from this repository.
+- A synthetic restore proves only the isolated data and migration path exercised by that run.

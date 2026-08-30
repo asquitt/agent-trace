@@ -1,3 +1,4 @@
+# MANUAL LOCAL TEST REFERENCE: no hosted runtime or deployment evidence.
 services:
   db:
     image: pgvector/pgvector:pg16
@@ -42,6 +43,12 @@ services:
       - API_REQUIRE_TENANT_HEADER=${API_REQUIRE_TENANT_HEADER:-true}
       - API_KEYS=${API_KEYS:-replace-me:local-operator:viewer|operator|admin:acme}
       - BROWSER_SESSION_COOKIE_SECURE=${BROWSER_SESSION_COOKIE_SECURE:-false}
+      - OBSERVABILITY_SCHEDULER_ENABLED=false
+      - OBSERVABILITY_SCHEDULER_RUN_DETECTORS=false
+      - OBSERVABILITY_SCHEDULER_RUN_POLICIES=false
+      - OBSERVABILITY_SCHEDULER_EXECUTE_POLICY_ACTIONS=false
+      - OBSERVABILITY_SCHEDULER_ENABLE_NOTIFICATIONS=false
+      - OBSERVABILITY_SCHEDULER_ORG_IDS=
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     depends_on:

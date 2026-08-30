@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import app
+from src.config import Settings, get_settings
 from src.database import async_session_factory
 from src.dependencies import get_storage_backend
 from src.models.idea import Idea, SourceType
@@ -22,11 +23,23 @@ from src.models.trace import SpanStatus, SpanType, TraceStatus, TraceType
 @pytest.fixture()
 def client() -> TestClient:
     """Create a TestClient or skip if infrastructure is unavailable."""
+    previous_override = app.dependency_overrides.get(get_settings)
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None,
+        api_auth_enabled=False,
+        api_require_tenant_header=False,
+        api_rate_limit_enabled=False,
+    )
     try:
         with TestClient(app) as test_client:
             yield test_client
     except Exception as exc:  # pragma: no cover - infra dependent
         pytest.skip(f"Trace integration test skipped (infra unavailable): {exc}")
+    finally:
+        if previous_override is None:
+            app.dependency_overrides.pop(get_settings, None)
+        else:
+            app.dependency_overrides[get_settings] = previous_override
 
 
 def _seed_trace_data(

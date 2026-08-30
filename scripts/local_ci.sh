@@ -15,6 +15,16 @@ if [[ "$MODE" == "--commit" && "$#" -ne 1 ]] || [[ "$MODE" == "--push" && "$#" -
   exit 2
 fi
 
+# Pre-commit must retain Git's prepared GIT_INDEX_FILE. Push modes instead
+# clear caller-local variables before operating on a detached clone.
+if [[ "$MODE" != "--commit" ]]; then
+  while IFS= read -r local_git_env_var; do
+    unset "$local_git_env_var"
+  done < <(git rev-parse --local-env-vars)
+fi
+
+export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+
 TOOLCHAIN_BIN="${LOCAL_CI_TOOLCHAIN_BIN:-$SCRIPT_ROOT/.venv/bin}"
 if [[ -d "$TOOLCHAIN_BIN" ]]; then
   export PATH="$TOOLCHAIN_BIN:$PATH"

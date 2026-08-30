@@ -1,15 +1,19 @@
-name: Production Gates
+name: Manual Internal Component Gates
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 9 * * 1"
+
+permissions:
+  contents: read
 
 jobs:
   gates:
+    name: Manual repository validation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -30,12 +34,29 @@ jobs:
       - name: Performance Gate
         run: ./scripts/run_perf_gate.sh
 
+      - name: Record immutable evidence scope
+        if: always()
+        run: |
+          mkdir -p docs/reports
+          cat > docs/reports/EVIDENCE_SCOPE.txt <<EOF
+          evidence_scope=manual_repository_validation
+          production_evidence=false
+          repository=${GITHUB_REPOSITORY}
+          source_sha=${GITHUB_SHA}
+          workflow_ref=${GITHUB_WORKFLOW_REF}
+          run_id=${GITHUB_RUN_ID}
+          run_attempt=${GITHUB_RUN_ATTEMPT}
+          EOF
+
       - name: Upload gate reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: production-gate-reports
+          name: manual-component-gate-reports-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: warn
           path: |
+            docs/reports/EVIDENCE_SCOPE.txt
             docs/reports/security/**
             docs/reports/dr/**
             docs/reports/perf/**
