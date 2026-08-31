@@ -141,6 +141,10 @@ class Settings(BaseSettings):
         default=SecretStr(""),
         description="OpenAI API key",
     )
+    provider_execution_enabled: bool = Field(
+        default=False,
+        description="Allow external OpenAI and Anthropic provider requests",
+    )
 
     # Default models
     default_llm_model: str = Field(

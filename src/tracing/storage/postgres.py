@@ -227,11 +227,17 @@ class PostgresStorageBackend:
 
     # Query methods for API/CLI
 
-    async def get_trace(self, trace_id: UUID) -> Optional[AITrace]:
-        """Get a trace by ID with all spans.
+    async def get_trace(
+        self,
+        trace_id: UUID,
+        *,
+        org_id: Optional[str] = None,
+    ) -> Optional[AITrace]:
+        """Get a trace by ID with all spans, optionally constrained by tenant.
 
         Args:
             trace_id: ID of the trace
+            org_id: Tenant scope applied before prompt-bearing spans are loaded
 
         Returns:
             AITrace with spans loaded, or None if not found
@@ -239,11 +245,15 @@ class PostgresStorageBackend:
         async with self.session_factory() as session:
             from sqlalchemy.orm import selectinload
 
-            result = await session.execute(
+            query = (
                 select(AITrace)
                 .options(selectinload(AITrace.spans).selectinload(AITraceSpan.reasoning_steps))
                 .where(AITrace.id == trace_id)
             )
+            if org_id is not None:
+                query = query.where(AITrace.org_id == org_id)
+
+            result = await session.execute(query)
             return result.scalar_one_or_none()
 
     async def list_traces(

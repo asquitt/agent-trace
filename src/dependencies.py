@@ -46,6 +46,7 @@ def get_anthropic_client() -> TracedAnthropicClient:
     return TracedAnthropicClient(
         tracer=tracer,
         api_key=settings.anthropic_api_key.get_secret_value(),
+        execution_enabled=settings.provider_execution_enabled,
     )
 
 
@@ -56,6 +57,7 @@ def get_openai_client() -> TracedOpenAIClient:
     return TracedOpenAIClient(
         tracer=tracer,
         api_key=settings.openai_api_key.get_secret_value(),
+        execution_enabled=settings.provider_execution_enabled,
     )
 
 

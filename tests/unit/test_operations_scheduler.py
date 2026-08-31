@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from structlog.testing import capture_logs
 
 from src.config import Settings
 from src.services.operations_scheduler import (
@@ -456,11 +458,12 @@ async def test_scheduler_continues_when_one_org_run_fails(monkeypatch: pytest.Mo
     calls: list[str] = []
     bad_org = "bad-org"
     good_org = "good-org"
+    exception_marker = "CONFIDENTIAL-SCHEDULER-SQL-PARAMETER"
 
     async def fake_run_once(self: ObservabilityOperationsScheduler, org_id: str) -> dict[str, Any]:
         calls.append(org_id)
         if org_id == bad_org:
-            raise RuntimeError("simulated org failure")
+            raise RuntimeError(exception_marker)
         self._stop.set()  # noqa: SLF001 - test-specific introspection
         return {"org_id": org_id}
 
@@ -473,9 +476,10 @@ async def test_scheduler_continues_when_one_org_run_fails(monkeypatch: pytest.Mo
         durable_fence=_durable_fence_stub(),
     )
 
-    await scheduler.start()
-    await asyncio.wait_for(scheduler._stop.wait(), timeout=1)  # noqa: SLF001
-    await scheduler.stop()
+    with capture_logs() as logs:
+        await scheduler.start()
+        await asyncio.wait_for(scheduler._stop.wait(), timeout=1)  # noqa: SLF001
+        await scheduler.stop()
 
     status = scheduler.status()
     assert calls == [bad_org, good_org]
@@ -484,6 +488,15 @@ async def test_scheduler_continues_when_one_org_run_fails(monkeypatch: pytest.Mo
     assert status["org_count"] == 2
     assert bad_org not in repr(status)
     assert good_org not in repr(status)
+    captured_logs = json.dumps(logs, default=str, sort_keys=True)
+    assert exception_marker not in captured_logs
+    failure_log = next(
+        item for item in logs if item.get("event") == "observability_scheduler_org_run_failed"
+    )
+    assert failure_log["error_code"] == "observability_scheduler_org_run_failed:RuntimeError"
+    assert failure_log["exception_type"] == "RuntimeError"
+    assert "exception" not in failure_log
+    assert "exc_info" not in failure_log
 
 
 @pytest.mark.asyncio

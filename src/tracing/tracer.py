@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from contextvars import Token
 
 logger = structlog.get_logger(__name__)
+REDACTED_REASONING_DESCRIPTION = "Reasoning details redacted"
 
 
 class StorageBackend(Protocol):
@@ -111,16 +112,19 @@ class SpanContext:
             explanation: Plain-English explanation for customers
         """
         step_number = len(self._reasoning_steps) + 1
+        capture_sensitive_content = self.tracer.capture_prompts is True
         reasoning: ReasoningData = {
             "id": str(uuid4()),
             "span_id": str(self.span_id),
             "step_number": step_number,
             "step_type": step_type,
-            "description": description,
+            "description": (
+                description if capture_sensitive_content else REDACTED_REASONING_DESCRIPTION
+            ),
         }
-        if input_context is not None:
+        if capture_sensitive_content and input_context is not None:
             reasoning["input_context"] = input_context
-        if output_result is not None:
+        if capture_sensitive_content and output_result is not None:
             reasoning["output_result"] = output_result
         if confidence is not None:
             reasoning["confidence"] = confidence
@@ -132,7 +136,7 @@ class SpanContext:
             reasoning["weighted_score"] = weighted_score
         if weight_applied is not None:
             reasoning["weight_applied"] = weight_applied
-        if explanation is not None:
+        if capture_sensitive_content and explanation is not None:
             reasoning["explanation"] = explanation
 
         self._reasoning_steps.append(reasoning)
@@ -168,6 +172,8 @@ class Tracer:
             service_name: Name of the service for identification
             capture_prompts: Whether to capture full prompts/responses
         """
+        if type(capture_prompts) is not bool:
+            raise TypeError("capture_prompts must be a boolean")
         self.storage = storage
         self.service_name = service_name
         self.capture_prompts = capture_prompts
@@ -297,23 +303,31 @@ class Tracer:
 
             import traceback
 
+            error_type = type(e).__name__
+            if self.capture_prompts is True:
+                error_message = str(e)
+                error_traceback = traceback.format_exc()
+            else:
+                error_message = f"trace_execution_failed:{error_type}"
+                error_traceback = None
+
             await self.storage.update_trace(
                 trace_id,
                 {
                     "status": TraceStatus.FAILED.value,
                     "completed_at": completed_at.isoformat(),
                     "duration_ms": duration_ms,
-                    "error_message": str(e),
-                    "error_type": type(e).__name__,
-                    "error_traceback": traceback.format_exc(),
+                    "error_message": error_message,
+                    "error_type": error_type,
+                    "error_traceback": error_traceback,
                 },
             )
 
             self.logger.error(
                 "trace_failed",
                 trace_id=str(trace_id),
-                error=str(e),
-                error_type=type(e).__name__,
+                error=error_message,
+                error_type=error_type,
             )
             raise
 
@@ -382,7 +396,7 @@ class Tracer:
         }
 
         # Capture prompts if enabled
-        if self.capture_prompts:
+        if self.capture_prompts is True:
             if system_prompt:
                 span_data["system_prompt"] = system_prompt
             if user_prompt:
@@ -421,7 +435,7 @@ class Tracer:
 
             if span_context._output_data:
                 update_data["output_data"] = span_context._output_data
-            if span_context._response_text and self.capture_prompts:
+            if span_context._response_text and self.capture_prompts is True:
                 update_data["assistant_response"] = span_context._response_text
 
             await self.storage.update_span(span_id, update_data)
@@ -445,14 +459,28 @@ class Tracer:
             completed_at = datetime.now(timezone.utc)
             duration_ms = int((completed_at - started_at).total_seconds() * 1000)
 
+            error_type = type(e).__name__
+            error_message = (
+                str(e)
+                if self.capture_prompts is True
+                else f"span_execution_failed:{error_type}"
+            )
+
             await self.storage.update_span(
                 span_id,
                 {
                     "status": SpanStatus.FAILED.value,
                     "completed_at": completed_at.isoformat(),
                     "duration_ms": duration_ms,
-                    "error_message": str(e),
+                    "error_message": error_message,
                 },
+            )
+            self.logger.error(
+                "span_failed",
+                trace_id=str(ctx.trace_id),
+                span_id=str(span_id),
+                error=error_message,
+                error_type=error_type,
             )
             raise
 

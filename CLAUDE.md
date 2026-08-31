@@ -1,8 +1,17 @@
-# AI Trace - Agent Observability & Runtime Governance
+# AI Trace - Internal Telemetry and Incident-Evidence Inventory
 
 ## Autonomous Delivery Standard
 
 These rules govern implementation, diagnosis, review, release, and handoff. More specific project invariants below remain binding.
+
+## Binding Product Disposition
+
+- `docs/DISPOSITION.md` governs this repository. AI Trace is a private internal implementation inventory, not a standalone product, hosted service, public package, or generic control plane.
+- The default activity is read-only source and test evaluation. Repository maintenance is limited to governance, dependency/security, or risk-reducing corrections that add no capability, compatibility promise, deployment path, or product-adoption behavior.
+- Every capability expansion or adoption change must identify a named active product, accountable owner, product-local acceptance criteria, and operator or customer outcome. Missing ownership or evidence is a `HOLD`, not permission to generalize the repository.
+- The first consumer implements the needed behavior in that product's canonical layer and owns authentication, tenancy, data minimization, persistence, operations, rollback, and evidence.
+- Shared extraction is prohibited until two independent active products satisfy every item in the second-consumer gate in `docs/DISPOSITION.md`. Similar code or one consumer is insufficient.
+- Do not publish or deploy this repository, enable provider or outbound side effects, or run migrations against a product or shared database without a new explicit owner decision that satisfies the disposition.
 
 ### Scope and planning
 
@@ -35,7 +44,7 @@ These rules govern implementation, diagnosis, review, release, and handoff. More
 
 - Bug fix: reproduce with a focused regression, implement the smallest fix, and prove the regression now passes.
 - Start with the narrowest relevant checks, then run changed-file gates and broader build, integration, E2E, security, or release gates in proportion to risk.
-- The normal AI Trace path is focused pytest, configured Ruff and Pyright scopes, the security gate, migration checks, and exact Docker image or health probes for runtime changes.
+- The normal AI Trace path is focused pytest plus configured Ruff and Pyright scopes. Security, migration, Docker, API, or health checks are proportional follow-ups only for explicitly authorized risk-reducing maintenance or a product-owned change, and must use an isolated target. Verification does not authorize deployment, provider execution, adoption, or capability expansion.
 - Test negative and adversarial cases for auth, isolation, validation, retries, partial failure, rollback, and cleanup when those boundaries change.
 - Verify APIs with actual requests and response bodies, UI with a real render and interaction, persistence with stored and reloaded state, and background work with produced results and logs.
 - If a required gate cannot run, report exactly what passed, what failed, and what remains unverified.
@@ -77,19 +86,20 @@ Report the exact branch and head, files changed, tests and probes run, runtime o
 
 ### AI Trace risk focus
 
-Prioritize tenant isolation, leader versus standby truth, advisory locking, stale-session projections, monotonic activity watermarks, approval-gated shutdown, dependency locks, production startup, and the development-only dashboard boundary.
+For an explicitly authorized component evaluation, prioritize tenant isolation, leader versus standby truth, advisory locking, stale-session projections, monotonic activity watermarks, approval-gated shutdown, dependency locks, and the development-only dashboard boundary. Do not treat those historical runtime surfaces as an active production roadmap.
 
-## Quick Start
+## Read-Only Evaluation Start
 ```bash
-cd docker && docker compose up -d db redis
-cd .. && pip install -e ".[dev]"
-alembic upgrade head
-uvicorn src.api.main:app --reload
+python -m pytest <target> -q
+ruff check --select F src tests
+pyright
 ```
 
-## Architecture
+Do not start Docker, run migrations, launch the API, call providers, send notifications, or deploy by default. A required runtime check must belong to explicitly authorized risk-reducing maintenance or a product-owned change and use an isolated disposable target. The check itself does not authorize deployment, provider execution, adoption, or capability expansion.
 
-**Agent Fleet Observability**: Real-time monitoring, anomaly detection, policy evaluation, durable control requests, and governance audit for production AI agent fleets.
+## Historical Inventory
+
+The repository preserves telemetry, anomaly, policy, durable-control, and audit implementations for bounded evaluation. Their presence does not establish a supported control plane, production fleet integration, or active runtime.
 
 ```
 src/
@@ -141,16 +151,15 @@ alembic/versions/            # 7 migration files
 - **Type Checking**: Pyright (strict mode)
 - **Linting**: Ruff
 
-## Commands
+## Repository Evaluation Commands
 ```bash
-uvicorn src.api.main:app --reload       # Dev server
 pytest -q -p pytest_cov -p pytest_asyncio  # Run tests
 ruff check --select F src tests         # Lint
 pyright                                 # Type check
-alembic upgrade head                    # Run migrations
-./scripts/run_full_e2e.sh               # Full E2E validation
 ./scripts/security_gate.sh              # Security scan (bandit + pip-audit)
 ```
+
+`./scripts/run_full_e2e.sh`, migrations, Docker, API startup, provider calls, outbound delivery, and deployment are conditional evidence tools, not a quick start. Use them only when explicitly authorized risk-reducing maintenance or a product-owned change requires that exact isolated proof. Verification does not authorize deployment, provider execution, adoption, or capability expansion.
 
 ## File Placement Rules (MANDATORY)
 
@@ -195,7 +204,7 @@ When your changes make files, imports, or functions unused, **delete them in the
 1. **API responses**: curl the endpoint, check the response
 2. **Type check**: `pyright` passes
 3. **Tests**: pytest passes
-4. **Migrations**: `alembic upgrade head` succeeds
+4. **Conditional runtime evidence**: migrations, API probes, or external-boundary checks pass only when the authorized change actually requires them and the target is isolated
 
 **If you cannot verify, say so explicitly. Never fabricate verification results.**
 
@@ -230,14 +239,6 @@ When modifying 3+ files:
 
 **ASK first:** Architecture changes, new features, schema migrations, new dependencies, security changes
 
-## Debug
-```bash
-curl -s http://localhost:8000/health/live | jq
-curl -s http://localhost:8000/api/v1/observability/dashboard/ui  # Dashboard
-docker compose logs api --tail=50
-```
+## Runtime Inventory Boundary
 
-## Health
-- API: localhost:8000
-- PostgreSQL: localhost:5434 (pgvector)
-- Redis: localhost:6379
+Historical local API, PostgreSQL, Redis, Docker, and console surfaces are not expected to be running. Do not start or inspect them unless explicitly authorized risk-reducing maintenance or a product-owned change requires that isolated evidence.

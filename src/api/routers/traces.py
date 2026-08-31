@@ -10,9 +10,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from ...dependencies import AuthDep, StorageDep
 from ...models.trace import TraceStatus, TraceType
 from ...security import AuthContext, require_org_access, require_roles
+from ...tracing.tracer import REDACTED_REASONING_DESCRIPTION
 from ...utils.time import to_naive_utc
 
 router = APIRouter(prefix="/api/v1/traces", tags=["traces"])
+
+# Trace metadata is caller-controlled. Add a key only after proving its value is
+# always non-sensitive; arbitrary metadata requires the explicit sensitive view.
+_PUBLIC_TRACE_METADATA_KEYS: frozenset[str] = frozenset()
 
 
 # Response models
@@ -137,6 +142,44 @@ class MetricsSummaryResponse(BaseModel):
 
 def _require_trace_viewer(auth: AuthContext) -> None:
     require_roles(auth, "viewer", "operator", "admin")
+
+
+def _require_sensitive_trace_access(auth: AuthContext) -> None:
+    require_roles(auth, "admin")
+
+
+def _trace_metadata_response(
+    metadata: dict[str, Any] | None,
+    *,
+    include_sensitive: bool,
+) -> dict[str, Any]:
+    source = metadata or {}
+    if include_sensitive:
+        return dict(source)
+    return {key: source[key] for key in _PUBLIC_TRACE_METADATA_KEYS if key in source}
+
+
+def _reasoning_step_response(
+    reasoning: Any,
+    *,
+    include_sensitive: bool,
+) -> ReasoningStepResponse:
+    return ReasoningStepResponse(
+        id=str(reasoning.id),
+        step_number=reasoning.step_number,
+        step_type=reasoning.step_type,
+        description=(
+            reasoning.description
+            if include_sensitive
+            else REDACTED_REASONING_DESCRIPTION
+        ),
+        dimension=reasoning.dimension,
+        raw_score=reasoning.raw_score,
+        weighted_score=reasoning.weighted_score,
+        weight_applied=reasoning.weight_applied,
+        explanation=reasoning.explanation if include_sensitive else None,
+        confidence=reasoning.confidence,
+    )
 
 
 def _resolve_trace_org_scope(auth: AuthContext, org_id: Optional[str]) -> Optional[str]:
@@ -333,7 +376,10 @@ async def get_trace(
     trace_id: UUID,
     storage: StorageDep,
     auth: AuthDep,
-    include_prompts: bool = Query(False, description="Include full prompts/responses"),
+    include_prompts: bool = Query(
+        False,
+        description="Include prompts/responses, trace metadata, and sensitive error details",
+    ),
 ) -> TraceResponse:
     """Get a single trace with all spans.
 
@@ -341,16 +387,12 @@ async def get_trace(
     This is useful for debugging but may return large responses.
     """
     _require_trace_viewer(auth)
-    trace = await storage.get_trace(trace_id)
+    if include_prompts:
+        _require_sensitive_trace_access(auth)
+    resolved_org_id = _resolve_trace_org_scope(auth, None)
+    trace = await storage.get_trace(trace_id, org_id=resolved_org_id)
     if not trace:
         raise HTTPException(status_code=404, detail="Trace not found")
-    if trace.org_id:
-        require_org_access(auth, trace.org_id)
-    elif not auth.is_global_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Trace has no org scope and requires global admin access",
-        )
 
     spans: list[SpanResponse] = []
     for span in trace.spans or []:
@@ -366,20 +408,9 @@ async def get_trace(
             input_tokens=span.input_tokens,
             output_tokens=span.output_tokens,
             status=span.status.value if hasattr(span.status, "value") else str(span.status),
-            error_message=span.error_message,
+            error_message=span.error_message if include_prompts else None,
             reasoning_steps=[
-                ReasoningStepResponse(
-                    id=str(r.id),
-                    step_number=r.step_number,
-                    step_type=r.step_type,
-                    description=r.description,
-                    dimension=r.dimension,
-                    raw_score=r.raw_score,
-                    weighted_score=r.weighted_score,
-                    weight_applied=r.weight_applied,
-                    explanation=r.explanation,
-                    confidence=r.confidence,
-                )
+                _reasoning_step_response(r, include_sensitive=include_prompts)
                 for r in (span.reasoning_steps or [])
             ],
         )
@@ -408,9 +439,12 @@ async def get_trace(
         total_input_tokens=trace.total_input_tokens,
         total_output_tokens=trace.total_output_tokens,
         estimated_cost_usd=trace.estimated_cost_usd,
-        error_message=trace.error_message,
+        error_message=trace.error_message if include_prompts else None,
         tags=trace.tags or [],
-        metadata=trace.trace_metadata or {},
+        metadata=_trace_metadata_response(
+            trace.trace_metadata,
+            include_sensitive=include_prompts,
+        ),
         spans=spans,
     )
 
@@ -420,6 +454,10 @@ async def get_trace_reasoning(
     trace_id: UUID,
     storage: StorageDep,
     auth: AuthDep,
+    include_prompts: bool = Query(
+        False,
+        description="Include sensitive model-derived reasoning text",
+    ),
 ) -> list[ReasoningStepResponse]:
     """Get all reasoning steps for a trace.
 
@@ -427,33 +465,18 @@ async def get_trace_reasoning(
     useful for understanding the decision chain.
     """
     _require_trace_viewer(auth)
-    trace = await storage.get_trace(trace_id)
+    if include_prompts:
+        _require_sensitive_trace_access(auth)
+    resolved_org_id = _resolve_trace_org_scope(auth, None)
+    trace = await storage.get_trace(trace_id, org_id=resolved_org_id)
     if not trace:
         raise HTTPException(status_code=404, detail="Trace not found")
-    if trace.org_id:
-        require_org_access(auth, trace.org_id)
-    elif not auth.is_global_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Trace has no org scope and requires global admin access",
-        )
 
     reasoning_steps: list[ReasoningStepResponse] = []
     for span in trace.spans or []:
         for r in span.reasoning_steps or []:
             reasoning_steps.append(
-                ReasoningStepResponse(
-                    id=str(r.id),
-                    step_number=r.step_number,
-                    step_type=r.step_type,
-                    description=r.description,
-                    dimension=r.dimension,
-                    raw_score=r.raw_score,
-                    weighted_score=r.weighted_score,
-                    weight_applied=r.weight_applied,
-                    explanation=r.explanation,
-                    confidence=r.confidence,
-                )
+                _reasoning_step_response(r, include_sensitive=include_prompts)
             )
 
     return reasoning_steps
@@ -503,23 +526,22 @@ async def export_trace_json(
     trace_id: UUID,
     storage: StorageDep,
     auth: AuthDep,
-    include_prompts: bool = Query(True, description="Include full prompts/responses"),
+    include_prompts: bool = Query(
+        False,
+        description="Include prompts/responses, trace metadata, and sensitive error details",
+    ),
 ) -> dict[str, Any]:
     """Export a trace as JSON for external analysis.
 
     Returns the complete trace data including all spans and reasoning steps.
     """
     _require_trace_viewer(auth)
-    trace = await storage.get_trace(trace_id)
+    if include_prompts:
+        _require_sensitive_trace_access(auth)
+    resolved_org_id = _resolve_trace_org_scope(auth, None)
+    trace = await storage.get_trace(trace_id, org_id=resolved_org_id)
     if not trace:
         raise HTTPException(status_code=404, detail="Trace not found")
-    if trace.org_id:
-        require_org_access(auth, trace.org_id)
-    elif not auth.is_global_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Trace has no org scope and requires global admin access",
-        )
 
     # Build complete export
     export_data: dict[str, Any] = {
@@ -536,9 +558,12 @@ async def export_trace_json(
             "total_input_tokens": trace.total_input_tokens,
             "total_output_tokens": trace.total_output_tokens,
             "estimated_cost_usd": trace.estimated_cost_usd,
-            "error_message": trace.error_message,
+            "error_message": trace.error_message if include_prompts else None,
             "tags": trace.tags or [],
-            "metadata": trace.trace_metadata or {},
+            "metadata": _trace_metadata_response(
+                trace.trace_metadata,
+                include_sensitive=include_prompts,
+            ),
         },
         "spans": [],
     }
@@ -556,17 +581,21 @@ async def export_trace_json(
             "input_tokens": span.input_tokens,
             "output_tokens": span.output_tokens,
             "status": span.status.value if hasattr(span.status, "value") else str(span.status),
-            "error_message": span.error_message,
+            "error_message": span.error_message if include_prompts else None,
             "reasoning_steps": [
                 {
                     "step_number": r.step_number,
                     "step_type": r.step_type,
-                    "description": r.description,
+                    "description": (
+                        r.description
+                        if include_prompts
+                        else REDACTED_REASONING_DESCRIPTION
+                    ),
                     "dimension": r.dimension,
                     "raw_score": r.raw_score,
                     "weighted_score": r.weighted_score,
                     "weight_applied": r.weight_applied,
-                    "explanation": r.explanation,
+                    "explanation": r.explanation if include_prompts else None,
                     "confidence": r.confidence,
                 }
                 for r in (span.reasoning_steps or [])

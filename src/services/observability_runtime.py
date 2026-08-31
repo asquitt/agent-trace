@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -39,9 +40,20 @@ from ..utils.time import to_naive_utc, utc_now_naive
 from .runtime_controls import runtime_control_idempotency_key
 from .runtime_governance import require_runtime_governance_enabled
 
+_MAX_ANOMALY_TITLE_LENGTH = 255
+_ANOMALY_TITLE_DIGEST_LENGTH = 12
+
 
 def _enum_value(value: Any) -> str:
     return value.value if hasattr(value, "value") else str(value)
+
+
+def _bounded_anomaly_title(value: str) -> str:
+    if len(value) <= _MAX_ANOMALY_TITLE_LENGTH:
+        return value
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:_ANOMALY_TITLE_DIGEST_LENGTH]
+    prefix_length = _MAX_ANOMALY_TITLE_LENGTH - len(digest) - 1
+    return f"{value[:prefix_length]}-{digest}"
 
 
 def _action_priority(action: str) -> int:
@@ -833,7 +845,7 @@ async def _detect_api_spikes(
             observed_value=float(current_count),
             deviation_ratio=ratio,
             score=min(ratio / config.api_spike_multiplier, 5.0),
-            title=f"API call spike for agent {agent_id}",
+            title=_bounded_anomaly_title(f"API call spike for agent {agent_id}"),
             description=(
                 f"Current window action count {current_count} is {ratio:.2f}x baseline "
                 f"average {baseline_avg:.2f}."
@@ -936,7 +948,7 @@ async def _detect_cost_spikes(
             observed_value=current_cost,
             deviation_ratio=ratio,
             score=min(ratio / config.cost_spike_multiplier, 5.0),
-            title=f"Cost spike for agent {agent_id}",
+            title=_bounded_anomaly_title(f"Cost spike for agent {agent_id}"),
             description=(
                 f"Current window cost ${current_cost:.4f} is {ratio:.2f}x "
                 f"baseline average ${baseline_avg:.4f}."
@@ -1039,7 +1051,7 @@ async def _detect_unusual_resources(
             observed_value=float(resource_count),
             deviation_ratio=None,
             score=1.0,
-            title=f"Unusual resource access by agent {agent_id}",
+            title=_bounded_anomaly_title(f"Unusual resource access by agent {agent_id}"),
             description=(
                 f"Resource {resource} was accessed {resource_count} times in the current "
                 "window but was not present in baseline behavior."

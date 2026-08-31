@@ -65,6 +65,8 @@ spec:
               value: "100000"
             - name: TRACE_CAPTURE_PROMPTS
               value: "false"
+            - name: PROVIDER_EXECUTION_ENABLED
+              value: "false"
             - name: RUNTIME_GOVERNANCE_ENABLED
               value: "false"
             - name: OBSERVABILITY_SCHEDULER_ENABLED

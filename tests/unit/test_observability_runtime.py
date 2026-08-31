@@ -21,6 +21,7 @@ from src.services import observability_runtime
 from src.services.observability_runtime import (
     _action_priority,
     _apply_policy_action,
+    _bounded_anomaly_title,
     _find_cycles,
     _period_window_start,
     _severity_rank,
@@ -68,6 +69,20 @@ def test_severity_rank_orders_levels() -> None:
     assert _severity_rank("low") < _severity_rank("medium")
     assert _severity_rank("medium") < _severity_rank("high")
     assert _severity_rank("high") < _severity_rank("critical")
+
+
+def test_anomaly_title_is_bounded_to_persisted_column_contract() -> None:
+    title = f"Unusual resource access by agent {'a' * 255}"
+    distinct_title = f"{title[:-1]}b"
+
+    bounded = _bounded_anomaly_title(title)
+    distinct_bounded = _bounded_anomaly_title(distinct_title)
+
+    assert len(bounded) == 255
+    assert len(distinct_bounded) == 255
+    assert bounded.startswith("Unusual resource access by agent ")
+    assert bounded != distinct_bounded
+    assert _bounded_anomaly_title("short title") == "short title"
 
 
 @pytest.mark.asyncio

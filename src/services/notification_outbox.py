@@ -453,6 +453,7 @@ class NotificationOutboxService:
 
     async def recover_expired_claims(self, *, org_id: str, limit: int) -> int:
         """Recover a bounded set of expired claims with durable truth updates."""
+        require_runtime_governance(self._settings)
         async with self._session_factory() as session:
             async with session.begin():
                 return await self._recover_expired_claims(
@@ -960,6 +961,7 @@ class NotificationOutboxService:
 
     async def cleanup_terminal_deliveries(self, *, org_id: str, limit: int) -> int:
         """Delete only conclusively terminal rows beyond the retention boundary."""
+        require_runtime_governance(self._settings)
         cutoff = utc_now_naive() - timedelta(
             days=self._settings.observability_notification_retention_days
         )

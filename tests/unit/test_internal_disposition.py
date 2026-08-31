@@ -273,7 +273,18 @@ def test_repository_surfaces_are_internal_and_manual_only() -> None:
     deployment = (ROOT_DIR / "deploy" / "k8s" / "api-deployment.yaml").read_text(
         encoding="utf-8"
     )
+    env_example = (ROOT_DIR / ".env.example").read_text(encoding="utf-8")
+    entrypoint = (ROOT_DIR / "docker" / "entrypoint.sh").read_text(encoding="utf-8")
     disposition = (ROOT_DIR / "docs" / "DISPOSITION.md").read_text(encoding="utf-8")
+    readme = (ROOT_DIR / "README.md").read_text(encoding="utf-8")
+    agent_instructions = (ROOT_DIR / "AGENTS.md").read_text(encoding="utf-8")
+    claude_instructions = (ROOT_DIR / "CLAUDE.md").read_text(encoding="utf-8")
+    pull_request_template = (
+        ROOT_DIR / ".github" / "pull_request_template.md"
+    ).read_text(encoding="utf-8")
+    normalized_disposition = " ".join(disposition.lower().split())
+    normalized_readme = " ".join(readme.lower().split())
+    normalized_template = " ".join(pull_request_template.lower().split())
 
     assert "internal" in project["description"].lower()
     assert "Private :: Do Not Upload" in project["classifiers"]
@@ -294,11 +305,109 @@ def test_repository_surfaces_are_internal_and_manual_only() -> None:
     assert "production_evidence=false" in workflow
     assert "image: ai-trace-internal:manual" in deployment
     assert "imagePullPolicy: Never" in deployment
-    assert 'name: RUNTIME_GOVERNANCE_ENABLED' in deployment
-    assert 'name: OBSERVABILITY_SCHEDULER_ENABLED' in deployment
-    assert deployment.count('value: "false"') >= 5
-    assert "two independent active products" in disposition.lower()
+    for setting_name in (
+        "TRACE_CAPTURE_PROMPTS",
+        "PROVIDER_EXECUTION_ENABLED",
+        "RUNTIME_GOVERNANCE_ENABLED",
+        "OBSERVABILITY_SCHEDULER_ENABLED",
+        "OBSERVABILITY_SCHEDULER_RUN_DETECTORS",
+        "OBSERVABILITY_SCHEDULER_RUN_POLICIES",
+        "OBSERVABILITY_SCHEDULER_EXECUTE_POLICY_ACTIONS",
+        "OBSERVABILITY_SCHEDULER_ENABLE_NOTIFICATIONS",
+        "MIGRATE_ON_START",
+    ):
+        literal = re.search(
+            rf"- name: {re.escape(setting_name)}\s+value: \"([^\"]+)\"",
+            deployment,
+        )
+        assert literal is not None, f"missing literal deployment default for {setting_name}"
+        assert literal.group(1) == "false"
+    for setting_name in (
+        "PROVIDER_EXECUTION_ENABLED",
+        "TRACE_CAPTURE_PROMPTS",
+        "MIGRATE_ON_START",
+        "RUNTIME_GOVERNANCE_ENABLED",
+        "OBSERVABILITY_SCHEDULER_ENABLED",
+    ):
+        env_literals = [
+            line.split("=", 1)[1].strip()
+            for line in env_example.splitlines()
+            if line.startswith(f"{setting_name}=")
+        ]
+        assert env_literals == ["false"]
+    assert 'parse_boolean "MIGRATE_ON_START" "false"' in entrypoint
+    assert 'if [ "$migrate_on_start" = "true" ]' in entrypoint
+    assert "two independent active products" in normalized_disposition
     assert (
         "any runtime, deployment, provider, or customer integration exists"
-        in disposition.lower()
+        in normalized_disposition
     )
+    assert "bounded repository maintenance may be explicitly authorized" in normalized_disposition
+    assert "historical database contains no sensitive data" in normalized_disposition
+    assert "historical stores contain no sensitive data" in normalized_readme
+    for sensitive_trace_clause in (
+        "deterministic safe error codes and exception types",
+        "generic 500 without re-logging the original exception",
+        "retains structural and numeric fields",
+        "redacting model-derived descriptions, contexts, results, and explanations",
+        "organization predicate before prompt-bearing spans are loaded",
+        "sensitive error, and model-derived reasoning details",
+    ):
+        assert sensitive_trace_clause in normalized_disposition
+        assert sensitive_trace_clause in normalized_readme
+    for rollback_clause in (
+        "remove or revoke provider credentials",
+        "block provider egress",
+        "stop or drain existing processes and in-flight calls",
+        "verify that no provider request occurs",
+    ):
+        assert rollback_clause in normalized_disposition
+        assert rollback_clause in normalized_readme
+    assert "provider_execution_enabled=false" in normalized_disposition
+    assert "older revision that does not implement the gate" in normalized_disposition
+    assert "provider_execution_enabled=false" in normalized_readme
+    assert "older revision that does not implement the gate" in normalized_readme
+    assert "provider-gate rollback" in normalized_template
+    assert "older revisions may ignore `provider_execution_enabled=false`" in normalized_template
+    for rollback_term in (
+        "credentials removed/revoked",
+        "egress blocked",
+        "processes and in-flight calls drained",
+        "zero provider requests verified",
+    ):
+        assert rollback_term in normalized_template
+    assert "do not extend the generic console, control plane" in normalized_readme
+    assert (
+        "implements the smallest required capability in its own canonical layer"
+        in normalized_readme
+    )
+    for control_surface in (agent_instructions, claude_instructions):
+        normalized = control_surface.lower()
+        assert "binding product disposition" in normalized
+        assert "read-only source and test evaluation" in normalized
+        assert (
+            "repository maintenance is limited to governance, dependency/security, "
+            "or risk-reducing corrections that add no capability, compatibility promise, "
+            "deployment path, or product-adoption behavior"
+        ) in normalized
+        assert "every capability expansion or adoption change must identify a named active product" in normalized
+        assert "the first consumer implements the needed behavior in that product's canonical layer" in normalized
+        assert "shared extraction is prohibited until two independent active products" in normalized
+        assert "do not publish or deploy this repository" in normalized
+        assert "verification does not authorize deployment, provider execution, adoption, or capability expansion" in normalized
+        for prohibited_instruction in (
+            "docker compose up",
+            "alembic upgrade head",
+            "uvicorn src.api.main:app",
+            "for production ai agent fleets",
+            "real-time monitoring, anomaly detection",
+        ):
+            assert prohibited_instruction not in normalized
+
+    assert "disposition and ownership" in normalized_template
+    assert "maintenance proof that this adds no capability" in normalized_template
+    assert "required for every capability expansion or adoption" in normalized_template
+    assert "named active product and accountable owner" in normalized_template
+    assert "product-local implementation location" in normalized_template
+    assert "two independent active products" in normalized_template
+    assert "all eight second-consumer gate items" in normalized_template
