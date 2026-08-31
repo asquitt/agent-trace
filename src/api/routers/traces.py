@@ -15,6 +15,10 @@ from ...utils.time import to_naive_utc
 
 router = APIRouter(prefix="/api/v1/traces", tags=["traces"])
 
+# Trace metadata is caller-controlled. Add a key only after proving its value is
+# always non-sensitive; arbitrary metadata requires the explicit sensitive view.
+_PUBLIC_TRACE_METADATA_KEYS: frozenset[str] = frozenset()
+
 
 # Response models
 
@@ -142,6 +146,17 @@ def _require_trace_viewer(auth: AuthContext) -> None:
 
 def _require_sensitive_trace_access(auth: AuthContext) -> None:
     require_roles(auth, "admin")
+
+
+def _trace_metadata_response(
+    metadata: dict[str, Any] | None,
+    *,
+    include_sensitive: bool,
+) -> dict[str, Any]:
+    source = metadata or {}
+    if include_sensitive:
+        return dict(source)
+    return {key: source[key] for key in _PUBLIC_TRACE_METADATA_KEYS if key in source}
 
 
 def _reasoning_step_response(
@@ -363,7 +378,7 @@ async def get_trace(
     auth: AuthDep,
     include_prompts: bool = Query(
         False,
-        description="Include full prompts/responses and sensitive error details",
+        description="Include prompts/responses, trace metadata, and sensitive error details",
     ),
 ) -> TraceResponse:
     """Get a single trace with all spans.
@@ -426,7 +441,10 @@ async def get_trace(
         estimated_cost_usd=trace.estimated_cost_usd,
         error_message=trace.error_message if include_prompts else None,
         tags=trace.tags or [],
-        metadata=trace.trace_metadata or {},
+        metadata=_trace_metadata_response(
+            trace.trace_metadata,
+            include_sensitive=include_prompts,
+        ),
         spans=spans,
     )
 
@@ -510,7 +528,7 @@ async def export_trace_json(
     auth: AuthDep,
     include_prompts: bool = Query(
         False,
-        description="Include full prompts/responses and sensitive error details",
+        description="Include prompts/responses, trace metadata, and sensitive error details",
     ),
 ) -> dict[str, Any]:
     """Export a trace as JSON for external analysis.
@@ -542,7 +560,10 @@ async def export_trace_json(
             "estimated_cost_usd": trace.estimated_cost_usd,
             "error_message": trace.error_message if include_prompts else None,
             "tags": trace.tags or [],
-            "metadata": trace.trace_metadata or {},
+            "metadata": _trace_metadata_response(
+                trace.trace_metadata,
+                include_sensitive=include_prompts,
+            ),
         },
         "spans": [],
     }

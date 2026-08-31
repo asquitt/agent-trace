@@ -18,6 +18,7 @@ from src.tracing.storage.postgres import PostgresStorageBackend
 from src.tracing.tracer import REDACTED_REASONING_DESCRIPTION
 
 SENSITIVE_REASONING_MARKER = "SECRET-historical-reasoning-payload"
+SENSITIVE_METADATA_MARKER = "SECRET-historical-trace-metadata"
 
 
 class _TraceStorage:
@@ -145,7 +146,7 @@ def _trace(*, org_id: str | None = "acme") -> SimpleNamespace:
         estimated_cost_usd=0.01,
         error_message="trace-sensitive-error",
         tags=[],
-        trace_metadata={},
+        trace_metadata={"customer_context": SENSITIVE_METADATA_MARKER},
         spans=[span],
     )
 
@@ -286,18 +287,22 @@ async def test_default_view_hides_historical_sensitive_payloads(endpoint: Any) -
     if hasattr(result, "spans"):
         trace_error = result.error_message
         span_error = result.spans[0].error_message
+        metadata = result.metadata
     else:
         trace_error = result["trace"]["error_message"]
         span_error = result["spans"][0]["error_message"]
+        metadata = result["trace"]["metadata"]
 
     assert trace_error is None
     assert span_error is None
+    assert metadata == {}
     serialized = (
         json.dumps(result.model_dump(mode="json"), sort_keys=True)
         if hasattr(result, "model_dump")
         else json.dumps(result, sort_keys=True)
     )
     assert SENSITIVE_REASONING_MARKER not in serialized
+    assert SENSITIVE_METADATA_MARKER not in serialized
     assert REDACTED_REASONING_DESCRIPTION in serialized
 
 
@@ -315,18 +320,22 @@ async def test_explicit_admin_sensitive_view_can_read_sensitive_payloads(endpoin
     if hasattr(result, "spans"):
         trace_error = result.error_message
         span_error = result.spans[0].error_message
+        metadata = result.metadata
     else:
         trace_error = result["trace"]["error_message"]
         span_error = result["spans"][0]["error_message"]
+        metadata = result["trace"]["metadata"]
 
     assert trace_error == "trace-sensitive-error"
     assert span_error == "span-sensitive-error"
+    assert metadata == {"customer_context": SENSITIVE_METADATA_MARKER}
     serialized = (
         json.dumps(result.model_dump(mode="json"), sort_keys=True)
         if hasattr(result, "model_dump")
         else json.dumps(result, sort_keys=True)
     )
     assert SENSITIVE_REASONING_MARKER in serialized
+    assert SENSITIVE_METADATA_MARKER in serialized
 
 
 @pytest.mark.asyncio

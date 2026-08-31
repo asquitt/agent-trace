@@ -100,18 +100,20 @@ class RankingService:
             Ranking with SWOT, scores, and recommendation
         """
         correlation_id = uuid4()
+        trace_metadata: dict[str, object] = {"source": idea.source_type.value}
+        log_context: dict[str, object] = {"idea_id": idea.id}
+        if self.tracer.capture_prompts is True:
+            trace_metadata["idea_name"] = idea.name
+            log_context["idea_name"] = idea.name
 
         async with self.tracer.start_trace(
             TraceType.RANKING,
             correlation_id=correlation_id,
             idea_id=idea.id,
             tags=["ranking", idea.source_type.value],
-            metadata={
-                "idea_name": idea.name,
-                "source": idea.source_type.value,
-            },
+            metadata=trace_metadata,
         ):
-            self.logger.info("ranking_started", idea_id=idea.id, idea_name=idea.name)
+            self.logger.info("ranking_started", **log_context)
 
             # Step 1: Generate SWOT analysis
             swot = await self._generate_swot(idea)

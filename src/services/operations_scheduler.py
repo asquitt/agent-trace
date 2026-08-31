@@ -39,6 +39,16 @@ _SCHEDULER_EXECUTION_LOCK_ID = 0x4149545241434502
 _SCHEDULER_LEASE_NAME = "observability-operations"
 _LEADERSHIP_RETRY_SECONDS = 5.0
 
+
+def _log_scheduler_failure(event: str, error: BaseException) -> None:
+    """Log scheduler failures without exception messages, parameters, or tracebacks."""
+    exception_type = type(error).__name__
+    logger.error(
+        event,
+        error_code=f"{event}:{exception_type}",
+        exception_type=exception_type,
+    )
+
 _ACQUIRE_DURABLE_LEASE = text(
     """
     INSERT INTO observability_scheduler_leases (
@@ -296,7 +306,7 @@ class PostgresAdvisoryLeadershipLock:
             raise
         except Exception as exc:
             await self._invalidate_connection(connection, exc)
-            logger.exception("observability_scheduler_leadership_release_failed")
+            _log_scheduler_failure("observability_scheduler_leadership_release_failed", exc)
             return
 
         try:
@@ -308,7 +318,7 @@ class PostgresAdvisoryLeadershipLock:
             raise
         except Exception as exc:
             await self._invalidate_connection(connection, exc)
-            logger.exception("observability_scheduler_leadership_close_failed")
+            _log_scheduler_failure("observability_scheduler_leadership_close_failed", exc)
 
     @staticmethod
     async def _invalidate_connection(
@@ -326,10 +336,10 @@ class PostgresAdvisoryLeadershipLock:
             # invalidation continues and still prevents pool reuse.
             logger.warning("observability_scheduler_leadership_invalidation_cancelled")
             raise
-        except Exception:
+        except Exception as exc:
             # Do not call close() if invalidation itself could not begin: returning
             # an uncertain session to the pool would be less safe than leaking it.
-            logger.exception("observability_scheduler_leadership_invalidation_failed")
+            _log_scheduler_failure("observability_scheduler_leadership_invalidation_failed", exc)
             return
 
         # After invalidation, close only finalizes the facade; the DBAPI session
@@ -641,10 +651,7 @@ class ObservabilityOperationsScheduler:
         except Exception as exc:  # pragma: no cover - exact driver errors vary
             self._set_leadership_state("error", error="leadership_lock_unavailable")
             await self._release_coordination()
-            logger.exception(
-                "observability_scheduler_leadership_error",
-                error=str(exc),
-            )
+            _log_scheduler_failure("observability_scheduler_leadership_error", exc)
             return False
 
     async def _release_coordination(self) -> None:
@@ -652,8 +659,8 @@ class ObservabilityOperationsScheduler:
         await self._stop_lease_heartbeat()
         try:
             await self._durable_fence.release()
-        except Exception:
-            logger.exception("observability_scheduler_durable_fence_release_failed")
+        except Exception as exc:
+            _log_scheduler_failure("observability_scheduler_durable_fence_release_failed", exc)
         await self._release_advisory_locks()
 
     async def _release_advisory_locks(self) -> None:
@@ -697,9 +704,9 @@ class ObservabilityOperationsScheduler:
                     if await self._durable_fence.renew():
                         continue
                 except Exception as exc:  # pragma: no cover - driver-specific failures
-                    logger.exception(
+                    _log_scheduler_failure(
                         "observability_scheduler_durable_fence_heartbeat_failed",
-                        error=str(exc),
+                        exc,
                     )
                 self._durable_fence_lost.set()
                 self._set_leadership_state("error", error="scheduler_fence_lost")
@@ -1014,11 +1021,7 @@ class ObservabilityOperationsScheduler:
                         org_state = self._state["org_runs"].setdefault(org_id, {})
                         org_state["last_error"] = error_message
                         org_state["last_failed_at"] = utc_now_iso()
-                        logger.exception(
-                            "observability_scheduler_org_run_failed",
-                            org_id=org_id,
-                            error_code=type(exc).__name__,
-                        )
+                        _log_scheduler_failure("observability_scheduler_org_run_failed", exc)
                     # Re-verify before starting any non-transactional delivery work.
                     if not await self._ensure_leadership():
                         leadership_lost = True
@@ -1042,11 +1045,7 @@ class ObservabilityOperationsScheduler:
                         notification_delivery_failures += 1
                         org_state = self._state["org_runs"].setdefault(org_id, {})
                         org_state["last_delivery_error"] = "notification_outbox_worker_failed"
-                        logger.exception(
-                            "notification_outbox_worker_failed",
-                            org_id=org_id,
-                            error_code=type(exc).__name__,
-                        )
+                        _log_scheduler_failure("notification_outbox_worker_failed", exc)
                     # Network work may outlive a heartbeat; re-verify before next org.
                     if not await self._ensure_leadership():
                         leadership_lost = True
