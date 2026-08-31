@@ -437,6 +437,11 @@ Provide a recommendation and 3-5 action items."""
 
         try:
             return json.loads(text)
-        except json.JSONDecodeError:
-            self.logger.warning("json_parse_failed", text=text[:200])
+        except json.JSONDecodeError as error:
+            self.logger.warning(
+                "json_parse_failed",
+                error_code="provider_response_invalid_json",
+                exception_type=type(error).__name__,
+                response_length=len(text),
+            )
             return {}
