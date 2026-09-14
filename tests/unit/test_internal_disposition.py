@@ -283,7 +283,9 @@ def test_repository_surfaces_are_internal_and_manual_only() -> None:
         ROOT_DIR / ".github" / "pull_request_template.md"
     ).read_text(encoding="utf-8")
     normalized_disposition = " ".join(disposition.lower().split())
-    normalized_readme = " ".join(readme.lower().split())
+    evaluation_guide = (ROOT_DIR / "docs" / "LOCAL_EVALUATION.md").read_text(encoding="utf-8")
+    assert "(docs/LOCAL_EVALUATION.md)" in readme
+    normalized_evaluation_guide = " ".join(evaluation_guide.lower().split())
     normalized_template = " ".join(pull_request_template.lower().split())
 
     assert "internal" in project["description"].lower()
@@ -344,7 +346,7 @@ def test_repository_surfaces_are_internal_and_manual_only() -> None:
     )
     assert "bounded repository maintenance may be explicitly authorized" in normalized_disposition
     assert "historical database contains no sensitive data" in normalized_disposition
-    assert "historical stores contain no sensitive data" in normalized_readme
+    assert "historical stores contain no sensitive data" in normalized_evaluation_guide
     for sensitive_trace_clause in (
         "deterministic safe error codes and exception types",
         "generic 500 without re-logging the original exception",
@@ -354,7 +356,7 @@ def test_repository_surfaces_are_internal_and_manual_only() -> None:
         "sensitive error, and model-derived reasoning details",
     ):
         assert sensitive_trace_clause in normalized_disposition
-        assert sensitive_trace_clause in normalized_readme
+        assert sensitive_trace_clause in normalized_evaluation_guide
     for rollback_clause in (
         "remove or revoke provider credentials",
         "block provider egress",
@@ -362,11 +364,11 @@ def test_repository_surfaces_are_internal_and_manual_only() -> None:
         "verify that no provider request occurs",
     ):
         assert rollback_clause in normalized_disposition
-        assert rollback_clause in normalized_readme
+        assert rollback_clause in normalized_evaluation_guide
     assert "provider_execution_enabled=false" in normalized_disposition
     assert "older revision that does not implement the gate" in normalized_disposition
-    assert "provider_execution_enabled=false" in normalized_readme
-    assert "older revision that does not implement the gate" in normalized_readme
+    assert "provider_execution_enabled=false" in normalized_evaluation_guide
+    assert "older revision that does not implement the gate" in normalized_evaluation_guide
     assert "provider-gate rollback" in normalized_template
     assert "older revisions may ignore `provider_execution_enabled=false`" in normalized_template
     for rollback_term in (
@@ -376,10 +378,10 @@ def test_repository_surfaces_are_internal_and_manual_only() -> None:
         "zero provider requests verified",
     ):
         assert rollback_term in normalized_template
-    assert "do not extend the generic console, control plane" in normalized_readme
+    assert "do not extend the generic console, control plane" in normalized_evaluation_guide
     assert (
         "implements the smallest required capability in its own canonical layer"
-        in normalized_readme
+        in normalized_evaluation_guide
     )
     for control_surface in (agent_instructions, claude_instructions):
         normalized = control_surface.lower()

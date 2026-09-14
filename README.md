@@ -1,109 +1,63 @@
-# AI Trace Internal Components
+# AI Trace
 
-AI Trace is an internal inventory of telemetry and incident-evidence components. It is not
-a standalone company, hosted product, or supported observability platform. Standalone product
-and generic platform investment is frozen.
+### Follow an AI workflow from its first span to its last side effect.
 
-The repository is retained so active products can evaluate and selectively integrate useful
-implementation patterns. Integration must happen in the product that owns the producer,
-persistence, operator workflow, and customer outcome. Do not deploy or publish this repository
-as a product.
+An LLM response is only one piece of an agent's execution. AI Trace explores how to connect nested model calls, background work, costs, errors, and incident records without turning observability into a store of sensitive prompts.
 
-## Retained Inventory
+Built with **Python, FastAPI, PostgreSQL, SQLAlchemy, and Celery**, it combines trace primitives with organization-scoped storage and explicit controls over provider execution and prompt capture.
 
-- Trace context, lifecycle, span, and decorator primitives under `src/tracing/`
-- PostgreSQL trace persistence and trace-query contracts
-- Structured trace, span, token, cost, error, and correlation evidence
-- Incident patterns including anomaly deduplication, audit records, idempotent notification
-  outbox delivery, and durable operation records
-- Focused unit and integration tests that document local behavior
+**Start with:** [trace context](src/tracing/context.py) · [decorators](src/tracing/decorators.py) · [storage](src/tracing/storage/postgres.py) · [privacy tests](tests/unit/test_sensitive_trace_authorization.py)
 
-Provider wrappers, anomaly and policy engines, runtime controls, scheduler behavior, browser
-sessions, the operator console, SIEM export, deployment templates, and production-preflight
-machinery remain implementation inventory only. They are not active product commitments.
+## What to look at
 
-See [`docs/DISPOSITION.md`](docs/DISPOSITION.md) for the binding disposition, safe default
-boundary, adoption gate, and known blockers.
+| Engineering question | Implementation |
+| --- | --- |
+| How does context survive nested async calls and queued work? | Immutable trace context, Python `contextvars`, and serializable correlation metadata in [`src/tracing/`](src/tracing/). |
+| How are observations connected to a tenant? | Organization-aware trace queries and persistence in [`storage/postgres.py`](src/tracing/storage/postgres.py). |
+| Can useful error evidence survive without raw prompts? | Capture controls, safe error codes, and reasoning redaction, covered by [provider governance](tests/unit/test_provider_execution_governance.py) and [reasoning tests](tests/unit/test_reasoning_redaction.py). |
+| How do notifications recover from retries? | Durable claims, expiration recovery, and idempotency identifiers in the [notification outbox](src/services/notification_outbox.py). |
 
-## Evidence Boundary
-
-### Implemented and locally testable
-
-The repository contains source code, migrations, deterministic tests, local gate scripts, a
-development console, and deployment examples. These can establish implementation behavior in a
-controlled local environment when the relevant checks are run against an exact commit.
-
-Historical test counts, generated reports, HTTP responses, built images, and checked-in manifests
-are evidence about those specific checks. They are not standing proof for the current checkout.
-
-### Not established
-
-This repository does not establish:
-
-- A hosted or production deployment
-- A current public application identity or operator journey
-- Delivery to, or enforcement by, a real product runtime
-- Current provider compatibility, pricing accuracy, or lifecycle coverage
-- Durable customer telemetry, incident response, or alert-receiver outcomes
-- Customer adoption, reliability, unit economics, or standalone product demand
-
-Any product making one of these claims must verify it in that product's own environment and retain
-the exact revision, configuration, producer, persistence, consumer, and user-visible evidence.
-
-## Safe Use
-
-The default is read-only evaluation. An active product may adopt the smallest relevant component
-only after defining its telemetry schema, sensitive-data policy, retention, failure semantics,
-ownership, and acceptance tests. The first adoption belongs in the product's canonical layer; a
-shared package is not justified until the second-consumer gate in `docs/DISPOSITION.md` passes.
-
-The runtime-governance setting is a cold fail-closed boundary, not a distributed emergency stop:
-it cannot revoke a control already delivered to an external runtime. Runtime-control adoption
-requires the separate pre-execution revocation contract documented in `docs/DISPOSITION.md`.
-
-`PROVIDER_EXECUTION_ENABLED=false` prevents the traced OpenAI and Anthropic wrappers from
-constructing SDK clients or issuing requests. `TRACE_CAPTURE_PROMPTS=false` omits full prompt,
-response, plaintext preview, raw exception text, and tracebacks from new traced provider calls;
-failures retain deterministic safe error codes and exception types, and the request boundary returns
-a generic 500 without re-logging the original exception. Capture-disabled reasoning persistence
-retains structural and numeric fields while redacting model-derived descriptions, contexts, results,
-and explanations. Tenant-scoped detail, reasoning, and export requests apply the caller's organization
-predicate before prompt-bearing spans are loaded. Prompt, response, sensitive error, and
-model-derived reasoning details require an administrator and explicit `include_prompts=true`. These
-controls do not prove that historical stores contain no sensitive data; an adopting product must
-audit and redact its own persisted records under its retention policy.
-
-Rollback across the provider-execution gate is security-sensitive. Do not revert the gate while
-provider credentials or provider-network egress remain available. Before rollback, remove or revoke
-provider credentials, block provider egress, stop or drain existing processes and in-flight calls,
-then verify that no provider request occurs under the rollback candidate.
-`PROVIDER_EXECUTION_ENABLED=false` is insufficient for an older revision that does not implement
-the gate.
-
-The container entrypoint defaults `MIGRATE_ON_START=false`, rejects ambiguous Boolean flag values,
-and performs no migration unless explicitly enabled. The local Compose reference opts its isolated
-database into migrations; that does not authorize mutation of a product or shared database.
-
-The package metadata is private and is not intended for publication. Existing dependencies and
-build requirements are retained because local repository gates still consume them; that retention
-does not make the package API stable or supported.
-
-## Local Verification
-
-Run only the checks required for the component being evaluated. Typical repository checks are:
-
-```bash
-ruff check --select F src tests
-pyright
-pytest -q
+```mermaid
+flowchart LR
+    A[Instrumented operation] --> B[Trace and nested spans]
+    B --> C[Organization-scoped storage]
+    C --> D[Trace queries and incident evidence]
+    D --> E[Explicitly enabled consumers]
 ```
 
-Database, Docker, provider, browser, notification, performance, and disaster-recovery checks each
-require their own explicit environment and prove only the boundary they actually exercise.
+Provider calls, scheduling, notifications, and runtime controls require their own explicit configuration. The trace model is not proof that a downstream runtime applied an action.
 
-## Investment Policy
+## Explore locally
 
-There is no standalone roadmap. Do not extend the generic console, control plane, deployment
-topology, scheduler, policy engine, or observability platform in this repository. A named active
-product implements the smallest required capability in its own canonical layer; shared extraction
-remains prohibited until the second-consumer gate in `docs/DISPOSITION.md` passes.
+Requires **Python 3.11+**. The focused tracing tests use controlled fixtures; they do not require live provider credentials.
+
+```bash
+git clone https://github.com/asquitt/agent-trace.git
+cd agent-trace
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
+python -m pytest tests/unit/test_tracing.py tests/unit/test_tracing_decorators.py -q
+```
+
+Read [`tests/unit/`](tests/unit/) for smaller examples of context propagation, error handling, privacy checks, and runtime-control boundaries. Database integration tests require a separately configured test database.
+
+## Privacy and execution boundaries
+
+`PROVIDER_EXECUTION_ENABLED=false` blocks traced provider requests, and `TRACE_CAPTURE_PROMPTS=false` disables capture of prompt-bearing details for new calls. Existing stored data still needs its own retention and redaction review. Sensitive detail requests require tenant authorization and explicit access checks.
+
+The [local evaluation guide](docs/LOCAL_EVALUATION.md) documents prompt handling, provider-gate rollback, migration defaults, and maintenance contracts. Read it before connecting credentials, databases, or external consumers. Public source availability does not establish hosted service availability or end-to-end enforcement.
+
+## Repository map
+
+- [`src/tracing/`](src/tracing/): context, decorators, spans, provider wrappers, and persistence.
+- [`src/api/`](src/api/): trace queries and operation endpoints.
+- [`src/services/`](src/services/): incident, notification, and runtime-control logic.
+- [`alembic/`](alembic/): database migrations.
+- [`tests/`](tests/): focused unit and integration contracts.
+
+## Discuss or contribute
+
+Useful discussion areas include async context propagation, privacy-preserving telemetry, outbox delivery semantics, and debugging AI workflows across queues. A minimal failing trace or focused regression test makes a great starting point.
+
+Built by [Demario Asquitt](https://github.com/asquitt). [More projects](https://github.com/asquitt#selected-work).
